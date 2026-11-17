@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">Hem</string>
-    <string name="service_label">Hem – Hem-knappen</string>
-    <string name="service_desc">Gör att Hem-knappen på fjärren öppnar Hem. Läser bara Hem-knappen, inget annat, och skickar ingen data någonstans.</string>
+    <string name="app_name">Home</string>
+    <string name="service_label">Home – Home button</string>
+    <string name="service_desc">Makes the Home button on your remote open Home. It only reads the Home button, nothing else, and never sends any data anywhere.</string>
 </resources>
