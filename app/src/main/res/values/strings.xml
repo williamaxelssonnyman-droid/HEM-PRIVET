@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Hem</string>
+    <string name="service_label">Hem – Hem-knappen</string>
+    <string name="service_desc">Gör att Hem-knappen på fjärren öppnar Hem. Läser bara Hem-knappen, inget annat, och skickar ingen data någonstans.</string>
+</resources>
