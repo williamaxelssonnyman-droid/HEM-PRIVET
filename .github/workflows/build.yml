@@ -4,6 +4,9 @@ on:
   push:
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -18,7 +21,15 @@ jobs:
           gradle-version: '8.7'
       - name: Bygg APK
         run: gradle assembleDebug --no-daemon --stacktrace
+      - name: Döp om
+        run: cp app/build/outputs/apk/debug/app-debug.apk hem.apk
       - uses: actions/upload-artifact@v4
         with:
           name: hem-apk
-          path: app/build/outputs/apk/debug/app-debug.apk
+          path: hem.apk
+      - name: Publicera senaste version
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete senaste --yes --cleanup-tag || true
+          gh release create senaste hem.apk --title "Hem – senaste" --notes "Byggd automatiskt från ${GITHUB_SHA::7}" --latest
