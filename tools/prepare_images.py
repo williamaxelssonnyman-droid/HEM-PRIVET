@@ -24,6 +24,14 @@ for i, name in enumerate(FILES, start=1):
     try:
         data = urllib.request.urlopen(BASE + name, timeout=60).read()
         im = Image.open(io.BytesIO(data)).convert("RGB")
+        # The TV draws its UI at 1920x1080; bigger pictures only cost memory and GPU time.
+        tw, th = 1920, 1080
+        scale = max(tw / im.width, th / im.height)
+        if scale < 1:
+            im = im.resize((round(im.width * scale), round(im.height * scale)), Image.LANCZOS)
+        if im.width > tw or im.height > th:
+            l, t = (im.width - tw) // 2, (im.height - th) // 2
+            im = im.crop((l, t, l + min(tw, im.width), t + min(th, im.height)))
         im.save(f"{RES}drawable-nodpi/wp{i}.jpg", quality=88, optimize=True)
         images[i] = im
         ok += 1

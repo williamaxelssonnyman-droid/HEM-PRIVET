@@ -33,7 +33,6 @@ import android.graphics.drawable.ColorDrawable;
 import android.graphics.drawable.Drawable;
 import android.graphics.drawable.GradientDrawable;
 import android.graphics.drawable.StateListDrawable;
-import android.graphics.RenderEffect;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
@@ -44,6 +43,7 @@ import android.text.TextWatcher;
 import android.util.TypedValue;
 import android.view.Gravity;
 import android.view.KeyEvent;
+import android.view.PixelCopy;
 import android.view.View;
 import android.view.ViewAnimationUtils;
 import android.view.ViewOutlineProvider;
@@ -71,6 +71,10 @@ import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 public class MainActivity extends Activity {
 
@@ -113,6 +117,18 @@ public class MainActivity extends Activity {
     PackageManager pm;
     float density;
     final Handler handler = new Handler(Looper.getMainLooper());
+    /** Wallpaper decoding happens here, never on the UI thread. */
+    final ExecutorService wpThread = Executors.newSingleThreadExecutor();
+    /** Loads app banners/names in the background so menus open instantly. */
+    final ExecutorService iconThread = Executors.newSingleThreadExecutor();
+    final Map<String, Drawable.ConstantState> bannerCache = new ConcurrentHashMap<>();
+    final Map<String, Drawable.ConstantState> iconCache = new ConcurrentHashMap<>();
+    final Set<String> noBanner = ConcurrentHashMap.newKeySet();
+    final Map<String, String> nameCache = new ConcurrentHashMap<>();
+    int wpToken = 0;
+    Bitmap currentWp;
+    ImageView blurView;
+    boolean blurOn = false;
 
     FrameLayout root;
     FrameLayout panLayer;
@@ -162,6 +178,19 @@ public class MainActivity extends Activity {
         pm = getPackageManager();
         density = getResources().getDisplayMetrics().density;
         buildUi();
+        iconThread.execute(() -> {
+            for (String p : allApps()) {
+                appName(p);
+                cardImage(p);
+            }
+        });
+    }
+
+    @Override
+    protected void onDestroy() {
+        super.onDestroy();
+        wpThread.shutdownNow();
+        iconThread.shutdownNow();
     }
 
     @Override
@@ -335,6 +364,12 @@ public class MainActivity extends Activity {
 
         content.addView(bottom, new FrameLayout.LayoutParams(-1, -2, Gravity.BOTTOM | Gravity.START));
 
+        // Frosted backdrop for menus: a blurred snapshot of the screen, faded in.
+        blurView = new ImageView(this);
+        blurView.setScaleType(ImageView.ScaleType.FIT_XY);
+        blurView.setVisibility(View.GONE);
+        root.addView(blurView, new FrameLayout.LayoutParams(-1, -1));
+
         setContentView(root);
     }
 
@@ -416,7 +451,7 @@ public class MainActivity extends Activity {
         clockBox.setScaleX(0.92f);
         clockBox.setScaleY(0.92f);
         clockBox.animate().alpha(1f).scaleX(1f).scaleY(1f).setDuration(1100)
-                .setInterpolator(new DecelerateInterpolator(2f)).start();
+                .setInterpolator(new DecelerateInterpolator(2f)).withLayer().start();
         appsTitle.setAlpha(0f);
         appsTitle.animate().alpha(1f).setStartDelay(200).setDuration(600).start();
     }
@@ -452,43 +487,130 @@ public class MainActivity extends Activity {
         if (panel != null || overlay != null || ambient) return;
         ambient = true;
         bottomBar.animate().alpha(0f).translationY(dp(60)).setDuration(1200)
-                .setInterpolator(new AccelerateDecelerateInterpolator()).start();
+                .setInterpolator(new AccelerateDecelerateInterpolator()).withLayer().start();
         gridBtn.animate().alpha(0f).setDuration(800).start();
         gearBtn.animate().alpha(0f).setDuration(800).start();
         clockBox.animate().translationY(dp(70)).scaleX(1.06f).scaleY(1.06f).setDuration(1600)
-                .setInterpolator(new AccelerateDecelerateInterpolator()).start();
+                .setInterpolator(new AccelerateDecelerateInterpolator()).withLayer().start();
     }
 
     void exitAmbient(boolean animate) {
         ambient = false;
         long d = animate ? 600 : 0;
         bottomBar.animate().alpha(1f).translationY(0).setDuration(d)
-                .setInterpolator(new DecelerateInterpolator(2f)).start();
+                .setInterpolator(new DecelerateInterpolator(2f)).withLayer().start();
         gridBtn.animate().alpha(1f).setDuration(d).start();
         gearBtn.animate().alpha(1f).setDuration(d).start();
         clockBox.animate().translationY(0).scaleX(1f).scaleY(1f).setDuration(d)
-                .setInterpolator(new DecelerateInterpolator(2f)).start();
+                .setInterpolator(new DecelerateInterpolator(2f)).withLayer().start();
         scheduleAmbient();
     }
 
     // ---------------------------------------------------------------- blur
 
-    ValueAnimator blurAnim;
-
+    /*
+     * The old version re-created a full-screen RenderEffect blur on every animation frame,
+     * which the Chromecast's small GPU can't keep up with. Now: grab ONE tiny copy of the
+     * screen (1/8 size), blur it on the CPU (a couple of milliseconds), and fade that picture
+     * in. While it covers the screen, the home screen underneath stops drawing completely.
+     */
     void setBlur(boolean on) {
-        if (Build.VERSION.SDK_INT < 31) return;
-        if (blurAnim != null) blurAnim.cancel();
-        if (on && pan != null) pan.pause();
-        if (!on && pan != null) pan.resume();
-        float from = on ? 0f : dp(22);
-        float to = on ? dp(22) : 0f;
-        blurAnim = ValueAnimator.ofFloat(from, to);
-        blurAnim.setDuration(on ? 380 : 260);
-        blurAnim.addUpdateListener(a -> {
-            float r = (float) a.getAnimatedValue();
-            home.setRenderEffect(r < 0.5f ? null : RenderEffect.createBlurEffect(r, r, Shader.TileMode.CLAMP));
-        });
-        blurAnim.start();
+        if (on == blurOn) return;
+        blurOn = on;
+        if (on) {
+            if (pan != null) pan.pause();
+            captureBlur();
+        } else {
+            if (pan != null && !ambient) pan.resume();
+            home.setVisibility(View.VISIBLE);
+            blurView.animate().cancel();
+            blurView.animate().alpha(0f).setDuration(240).withEndAction(() -> {
+                if (!blurOn) {
+                    blurView.setVisibility(View.GONE);
+                    blurView.setImageDrawable(null);
+                }
+            }).start();
+        }
+    }
+
+    void captureBlur() {
+        int w = Math.max(1, root.getWidth() / 8);
+        int h = Math.max(1, root.getHeight() / 8);
+        if (root.getWidth() <= 0) {
+            showBlur(fallbackBlurSource(w, h));
+            return;
+        }
+        final Bitmap small = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888);
+        try {
+            PixelCopy.request(getWindow(), small, result -> {
+                if (!blurOn) return;
+                showBlur(result == PixelCopy.SUCCESS ? small : fallbackBlurSource(small.getWidth(), small.getHeight()));
+            }, handler);
+        } catch (Throwable t) {
+            showBlur(fallbackBlurSource(w, h));
+        }
+    }
+
+    Bitmap fallbackBlurSource(int w, int h) {
+        if (currentWp == null) return null;
+        return Bitmap.createScaledBitmap(currentWp, Math.max(1, w), Math.max(1, h), true);
+    }
+
+    void showBlur(Bitmap src) {
+        if (!blurOn) return;
+        if (src == null) return;
+        if (!src.isMutable() || src.getConfig() != Bitmap.Config.ARGB_8888) {
+            src = src.copy(Bitmap.Config.ARGB_8888, true);
+        }
+        boxBlur(src, 3, 3);
+        blurView.setImageBitmap(src);
+        blurView.animate().cancel();
+        blurView.setAlpha(0f);
+        blurView.setVisibility(View.VISIBLE);
+        blurView.animate().alpha(1f).setDuration(280).setInterpolator(new DecelerateInterpolator())
+                .withEndAction(() -> {
+                    if (blurOn) home.setVisibility(View.INVISIBLE); // stop drawing what's hidden
+                }).start();
+    }
+
+    /** Fast box blur in place, repeated a few times (looks like a gaussian blur). */
+    static void boxBlur(Bitmap b, int radius, int passes) {
+        int w = b.getWidth(), h = b.getHeight();
+        int[] px = new int[w * h];
+        int[] tmp = new int[w * h];
+        b.getPixels(px, 0, w, 0, 0, w, h);
+        for (int p = 0; p < passes; p++) {
+            blurLine(px, tmp, w, h, radius, true);
+            blurLine(tmp, px, w, h, radius, false);
+        }
+        b.setPixels(px, 0, w, 0, 0, w, h);
+    }
+
+    static void blurLine(int[] in, int[] out, int w, int h, int r, boolean horizontal) {
+        int len = horizontal ? w : h;
+        int lines = horizontal ? h : w;
+        int div = r * 2 + 1;
+        for (int line = 0; line < lines; line++) {
+            int rs = 0, gs = 0, bs = 0;
+            for (int k = -r; k <= r; k++) {
+                int c = in[idx(Math.max(0, Math.min(len - 1, k)), line, w, horizontal)];
+                rs += (c >> 16) & 0xFF;
+                gs += (c >> 8) & 0xFF;
+                bs += c & 0xFF;
+            }
+            for (int i = 0; i < len; i++) {
+                out[idx(i, line, w, horizontal)] = 0xFF000000 | ((rs / div) << 16) | ((gs / div) << 8) | (bs / div);
+                int add = in[idx(Math.min(len - 1, i + r + 1), line, w, horizontal)];
+                int sub = in[idx(Math.max(0, i - r), line, w, horizontal)];
+                rs += ((add >> 16) & 0xFF) - ((sub >> 16) & 0xFF);
+                gs += ((add >> 8) & 0xFF) - ((sub >> 8) & 0xFF);
+                bs += (add & 0xFF) - (sub & 0xFF);
+            }
+        }
+    }
+
+    static int idx(int i, int line, int w, boolean horizontal) {
+        return horizontal ? line * w + i : i * w + line;
     }
 
     void applyClock() {
@@ -551,10 +673,10 @@ public class MainActivity extends Activity {
         int choice = prefs.getInt("bg", -1);
         if (choice == 0) {
             File f = new File(getExternalFilesDir(null), "bakgrund.jpg");
-            Bitmap b = f.exists() ? decodeFile(f.getAbsolutePath()) : null;
-            if (b != null) {
-                setWallpaperBitmap(b, wpIndex >= 0);
+            if (f.exists()) {
+                final boolean animate = wpIndex >= 0;
                 wpIndex = -2;
+                loadWallpaperAsync(() -> decodeFile(f.getAbsolutePath()), animate);
                 return;
             }
             Toast.makeText(this, "No bakgrund.jpg found – using the built-in wallpapers", Toast.LENGTH_LONG).show();
@@ -566,12 +688,33 @@ public class MainActivity extends Activity {
 
     void showWallpaper(int idx, boolean animate) {
         wpIndex = idx;
-        setWallpaperBitmap(decodeRes(WALLPAPERS[idx]), animate);
+        final int res = WALLPAPERS[idx];
+        loadWallpaperAsync(() -> decodeRes(res), animate);
     }
 
-    void setWallpaperBitmap(Bitmap b, boolean animate) {
-        final int newTint = pickTint(b);
-        clock.setGlass(ClockView.makeGlass(b), animate);
+    interface BitmapSource {
+        Bitmap get();
+    }
+
+    /** Decode + prepare the wallpaper off the UI thread, then swap it in. */
+    void loadWallpaperAsync(BitmapSource src, boolean animate) {
+        final int token = ++wpToken;
+        wpThread.execute(() -> {
+            Bitmap b = src.get();
+            if (b == null) return;
+            if (Build.VERSION.SDK_INT >= 24) b.prepareToDraw();
+            Bitmap glass = ClockView.makeGlass(b);
+            int t = pickTint(b);
+            handler.post(() -> {
+                if (token != wpToken || isDestroyed()) return;
+                setWallpaperBitmap(b, glass, t, animate);
+            });
+        });
+    }
+
+    void setWallpaperBitmap(Bitmap b, Bitmap glass, int newTint, boolean animate) {
+        currentWp = b;
+        clock.setGlass(glass, animate);
         ImageView front = aOnTop ? bgA : bgB;
         ImageView back = aOnTop ? bgB : bgA;
         if (!animate) {
@@ -588,7 +731,11 @@ public class MainActivity extends Activity {
         back.setScaleX(1.06f);
         back.setScaleY(1.06f);
         back.animate().alpha(1f).scaleX(1f).scaleY(1f).setDuration(2600)
-                .withEndAction(() -> front.setAlpha(0f)).start();
+                .withEndAction(() -> {
+                    if (front == (aOnTop ? bgA : bgB)) return; // a newer swap is using it
+                    front.setAlpha(0f);
+                    front.setImageDrawable(null); // free the old picture
+                }).start();
         aOnTop = !aOnTop;
         ValueAnimator va = ValueAnimator.ofObject(new ArgbEvaluator(), tint, newTint);
         va.setDuration(2600);
@@ -635,7 +782,8 @@ public class MainActivity extends Activity {
         pan.setRepeatMode(ValueAnimator.REVERSE);
         pan.setRepeatCount(ValueAnimator.INFINITE);
         pan.setInterpolator(new AccelerateDecelerateInterpolator());
-        pan.addUpdateListener(a -> clock.setPan(panLayer.getTranslationX(), panLayer.getScaleX()));
+        // NOTE: the clock is not told about every pan step any more. Doing that forced the
+        // huge clock to be repainted 60 times a second and was the main cause of the lag.
         pan.start();
     }
 
@@ -682,7 +830,7 @@ public class MainActivity extends Activity {
         f.setOnFocusChangeListener((v, has) -> {
             v.animate().scaleX(has ? 1.1f : 1f).scaleY(has ? 1.1f : 1f).translationY(has ? -dp(6) : 0)
                     .setDuration(220).setInterpolator(new OvershootInterpolator(1.4f)).start();
-            v.setElevation(has ? dp(18) : 0);
+            v.setElevation(has ? dp(12) : 0);
             if (Build.VERSION.SDK_INT >= 28) {
                 v.setOutlineSpotShadowColor(tint);
                 v.setOutlineAmbientShadowColor(tint);
@@ -734,7 +882,7 @@ public class MainActivity extends Activity {
                 t.setAlpha(0f);
                 t.setTranslationY(dp(40));
                 t.animate().alpha(1f).translationY(0).setStartDelay(150 + i * 70L).setDuration(520)
-                        .setInterpolator(new DecelerateInterpolator(2f)).start();
+                        .setInterpolator(new DecelerateInterpolator(2f)).withLayer().start();
             }
             i++;
         }
@@ -802,30 +950,56 @@ public class MainActivity extends Activity {
     }
 
     String appName(String p) {
+        String cached = nameCache.get(p);
+        if (cached != null) return cached;
         try {
             ApplicationInfo ai = pm.getApplicationInfo(p, 0);
-            return pm.getApplicationLabel(ai).toString();
+            String n = pm.getApplicationLabel(ai).toString();
+            nameCache.put(p, n);
+            return n;
         } catch (Exception e) {
             return p;
         }
     }
 
+    /** Loads (and caches) a card picture. Safe to call from a background thread. */
+    void cardImage(String p) {
+        banner(p);
+        if (noBanner.contains(p)) icon(p);
+    }
+
     Drawable banner(String p) {
+        Drawable.ConstantState cs = bannerCache.get(p);
+        if (cs != null) return cs.newDrawable().mutate();
+        if (noBanner.contains(p)) return null;
+        Drawable d = null;
         try {
             Intent i = pm.getLeanbackLaunchIntentForPackage(p);
-            if (i != null) {
-                Drawable d = pm.getActivityBanner(i);
-                if (d != null) return d;
-            }
-            return pm.getApplicationBanner(p);
-        } catch (Exception e) {
+            if (i != null) d = pm.getActivityBanner(i);
+            if (d == null) d = pm.getApplicationBanner(p);
+        } catch (Exception ignored) {
+        }
+        if (d == null) {
+            noBanner.add(p);
             return null;
         }
+        if (d.getConstantState() != null) {
+            bannerCache.put(p, d.getConstantState());
+            return d.getConstantState().newDrawable().mutate();
+        }
+        return d;
     }
 
     Drawable icon(String p) {
+        Drawable.ConstantState cs = iconCache.get(p);
+        if (cs != null) return cs.newDrawable().mutate();
         try {
-            return pm.getApplicationIcon(p);
+            Drawable d = pm.getApplicationIcon(p);
+            if (d.getConstantState() != null) {
+                iconCache.put(p, d.getConstantState());
+                return d.getConstantState().newDrawable().mutate();
+            }
+            return d;
         } catch (Exception e) {
             return new ColorDrawable(Color.DKGRAY);
         }
@@ -915,7 +1089,8 @@ public class MainActivity extends Activity {
             cell.addView(n);
             cell.setAlpha(0f);
             cell.setTranslationY(dp(20));
-            cell.animate().alpha(1f).translationY(0).setStartDelay(200 + Math.min(i, 20) * 25L).setDuration(380).start();
+            cell.animate().alpha(1f).translationY(0).setStartDelay(200 + Math.min(i, 20) * 25L).setDuration(380)
+                    .setInterpolator(new DecelerateInterpolator(2f)).withLayer().start();
             g.addView(cell);
             if (first == null) first = t;
             i++;
@@ -1073,7 +1248,7 @@ public class MainActivity extends Activity {
                 row.setAlpha(0f);
                 row.setTranslationX(dp(24));
                 row.animate().alpha(1f).translationX(0).setStartDelay(140 + i * 30L).setDuration(320)
-                        .setInterpolator(new DecelerateInterpolator(2f)).start();
+                        .setInterpolator(new DecelerateInterpolator(2f)).withLayer().start();
             }
             card.addView(row, new LinearLayout.LayoutParams(-1, -2));
             rows.add(row);
@@ -1109,7 +1284,8 @@ public class MainActivity extends Activity {
         panelRebuild = null;
         if (overlay == null) setBlur(false);
         if (animate) {
-            p.animate().alpha(0f).translationX(dp(20)).setDuration(220).withEndAction(() -> root.removeView(p)).start();
+            p.animate().alpha(0f).translationX(dp(20)).setDuration(220).withLayer()
+                    .withEndAction(() -> root.removeView(p)).start();
         } else {
             root.removeView(p);
         }

@@ -4,6 +4,7 @@ import android.animation.ValueAnimator;
 import android.content.Context;
 import android.graphics.Bitmap;
 import android.graphics.BitmapShader;
+import android.graphics.BlurMaskFilter;
 import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.ColorMatrix;
@@ -17,23 +18,43 @@ import android.graphics.Rect;
 import android.graphics.Shader;
 import android.graphics.Typeface;
 import android.view.View;
+import android.view.ViewParent;
 import android.view.animation.DecelerateInterpolator;
 import android.view.animation.OvershootInterpolator;
+
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Iterator;
+import java.util.Map;
+import java.util.Set;
 
 /**
  * A big clock whose digits are made of frosted glass: they are filled with a brightened,
  * blurred copy of the wallpaper behind them and fade out towards the bottom.
  * Digits that change roll in from below while the old ones float away.
+ *
+ * Performance: every digit is rendered ONCE into a small bitmap ("sprite") together with its
+ * glass fill and edge highlight, and the glow is a pre-blurred quarter-size alpha mask.
+ * Animating therefore only moves a few bitmaps around, which the TV's GPU handles easily.
+ * Nothing here redraws unless the time, the wallpaper or the settings change.
  */
 public class ClockView extends View {
 
+    static final int GLOW_SCALE = 4;
+
     final Paint fill = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.SUBPIXEL_TEXT_FLAG);
     final Paint edge = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.SUBPIXEL_TEXT_FLAG);
+    final Paint spritePaint = new Paint(Paint.FILTER_BITMAP_FLAG);
+    final Paint glowPaint = new Paint(Paint.FILTER_BITMAP_FLAG);
     final Rect digitBounds = new Rect();
     final OvershootInterpolator overshoot = new OvershootInterpolator(1.1f);
     final DecelerateInterpolator decel = new DecelerateInterpolator(1.8f);
-    final int[] loc = new int[2];
     final Matrix m = new Matrix();
+
+    final Map<String, Bitmap> sprites = new HashMap<>();
+    final Map<Character, Bitmap> glows = new HashMap<>();
+    final Set<String> usedThisFrame = new HashSet<>();
+    int locX = Integer.MIN_VALUE, locY = Integer.MIN_VALUE;
 
     String text = "";
     String old = "";
@@ -45,7 +66,7 @@ public class ClockView extends View {
     ValueAnimator glassAnim;
 
     float panX = 0f;
-    float panScale = 1f;
+    float panScale = 1.12f;
     int alphaPct = 60;
     int glow = 0x66FFFFFF;
 
@@ -58,9 +79,15 @@ public class ClockView extends View {
         setLayerType(LAYER_TYPE_HARDWARE, null);
     }
 
+    void clearSprites(boolean alsoGlow) {
+        sprites.clear();
+        if (alsoGlow) glows.clear();
+    }
+
     public void setTypeface(Typeface t) {
         fill.setTypeface(t);
         edge.setTypeface(t);
+        clearSprites(true);
         requestLayout();
     }
 
@@ -68,22 +95,29 @@ public class ClockView extends View {
         fill.setTextSize(px);
         edge.setTextSize(px);
         fill.getTextBounds("0123456789", 0, 10, digitBounds);
+        clearSprites(true);
         requestLayout();
     }
 
     public void setAlphaPercent(int a) {
+        if (a == alphaPct) return;
         alphaPct = a;
+        clearSprites(false); // the edge strength depends on it
         invalidate();
     }
 
     public void setGlow(int color) {
+        if (color == glow) return;
         glow = color;
         invalidate();
     }
 
+    /** The glass is aligned once; it no longer follows the moving wallpaper every frame. */
     public void setPan(float x, float scale) {
+        if (x == panX && scale == panScale) return;
         panX = x;
         panScale = scale;
+        clearSprites(false);
         invalidate();
     }
 
@@ -107,7 +141,7 @@ public class ClockView extends View {
         tickAnim.start();
     }
 
-    /** Make the frosted-glass texture from a wallpaper (cheap blur: shrink, then grow). */
+    /** Make the frosted-glass texture from a wallpaper (cheap blur: shrink, then grow). Thread-safe. */
     public static Bitmap makeGlass(Bitmap src) {
         if (src == null) return null;
         int w = 480, h = 270;
@@ -126,6 +160,8 @@ public class ClockView extends View {
         Paint p = new Paint(Paint.FILTER_BITMAP_FLAG);
         p.setColorFilter(new ColorMatrixColorFilter(cm));
         c.drawBitmap(blurred, 0, 0, p);
+        small.recycle();
+        blurred.recycle();
         return out;
     }
 
@@ -159,29 +195,154 @@ public class ClockView extends View {
         setMeasuredDimension(w, h);
     }
 
-    Shader glassShader(Bitmap g, float top, float bottom) {
+    @Override
+    protected void onSizeChanged(int w, int h, int ow, int oh) {
+        super.onSizeChanged(w, h, ow, oh);
+        clearSprites(true);
+    }
+
+    @Override
+    protected void onLayout(boolean changed, int l, int t, int r, int b) {
+        super.onLayout(changed, l, t, r, b);
+        // Position in the window from the layout alone (ignores running animations), so the
+        // glass lines up with the wallpaper the same way every time.
+        int x = 0, y = 0;
+        View v = this;
+        while (v != null) {
+            x += v.getLeft() - v.getScrollX();
+            y += v.getTop() - v.getScrollY();
+            ViewParent p = v.getParent();
+            v = p instanceof View ? (View) p : null;
+        }
+        if (x != locX || y != locY) {
+            locX = x;
+            locY = y;
+            clearSprites(false);
+        }
+    }
+
+    float baseline() {
+        return getHeight() / 2f + digitHeight() / 2f;
+    }
+
+    /** Glass fill in this view's coordinates. */
+    Shader glassShader(Bitmap g) {
+        float dh = digitHeight();
+        float baseline = baseline();
+        float top = baseline - dh;
+        Shader fade = new LinearGradient(0, top, 0, baseline + dh * 0.1f,
+                new int[]{0xFFFFFFFF, 0xF0FFFFFF, 0x26FFFFFF},
+                new float[]{0f, 0.5f, 1f}, Shader.TileMode.CLAMP);
+        if (g == null) {
+            return new LinearGradient(0, top, 0, baseline,
+                    new int[]{0xFFFFFFFF, 0x55FFFFFF}, null, Shader.TileMode.CLAMP);
+        }
         View rootView = getRootView();
         float rw = rootView.getWidth() > 0 ? rootView.getWidth() : getWidth();
         float rh = rootView.getHeight() > 0 ? rootView.getHeight() : getHeight();
-        getLocationInWindow(loc);
         BitmapShader bs = new BitmapShader(g, Shader.TileMode.CLAMP, Shader.TileMode.CLAMP);
         m.reset();
         m.setScale(rw / g.getWidth(), rh / g.getHeight());
         m.postScale(panScale, panScale, rw / 2f, rh / 2f);
         m.postTranslate(panX, 0);
-        m.postTranslate(-loc[0] - getTranslationX(), -loc[1] - getTranslationY());
+        m.postTranslate(-(locX == Integer.MIN_VALUE ? 0 : locX), -(locY == Integer.MIN_VALUE ? 0 : locY));
         bs.setLocalMatrix(m);
-        LinearGradient fade = new LinearGradient(0, top, 0, bottom,
-                new int[]{0xFFFFFFFF, 0xF0FFFFFF, 0x26FFFFFF},
-                new float[]{0f, 0.5f, 1f}, Shader.TileMode.CLAMP);
         return new ComposeShader(bs, fade, PorterDuff.Mode.DST_IN);
+    }
+
+    int spritePad() {
+        return Math.round(digitHeight() * 0.06f) + 4;
+    }
+
+    /** One character, filled with glass and outlined, rendered once at its resting place. */
+    Bitmap sprite(Bitmap g, char ch, float x) {
+        String key = System.identityHashCode(g) + "|" + ch + "|" + Math.round(x);
+        usedThisFrame.add(key);
+        Bitmap b = sprites.get(key);
+        if (b != null) return b;
+        if (getWidth() <= 0 || getHeight() <= 0) return null;
+        String s = String.valueOf(ch);
+        int pad = spritePad();
+        int w = Math.max(1, Math.round(fill.measureText(s)) + pad * 2);
+        b = Bitmap.createBitmap(w, getHeight(), Bitmap.Config.ARGB_8888);
+        Canvas c = new Canvas(b);
+        c.translate(-(x - pad), 0); // draw in view coordinates
+        float baseline = baseline();
+        float dh = digitHeight();
+        fill.setShader(glassShader(g));
+        fill.setAlpha(255);
+        c.drawText(s, x, baseline, fill);
+        fill.setShader(null);
+        // Thin glassy edge. The whole sprite is later drawn at the clock's transparency,
+        // so boost the edge to keep it about as visible as before.
+        float boost = Math.min(1f, alphaPct / 60f) / Math.max(0.15f, alphaPct / 100f);
+        edge.setShader(new LinearGradient(0, baseline - dh, 0, baseline,
+                new int[]{0x66FFFFFF, 0x10FFFFFF}, null, Shader.TileMode.CLAMP));
+        edge.setAlpha(Math.min(255, Math.round(255 * boost)));
+        c.drawText(s, x, baseline, edge);
+        edge.setShader(null);
+        sprites.put(key, b);
+        return b;
+    }
+
+    /** Soft glow around a character: a blurred quarter-size alpha mask, tinted when drawn. */
+    Bitmap glowSprite(char ch) {
+        Bitmap b = glows.get(ch);
+        if (b != null) return b;
+        if (getHeight() <= 0) return null;
+        float s = 1f / GLOW_SCALE;
+        Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
+        p.setTypeface(fill.getTypeface());
+        p.setTextSize(fill.getTextSize() * s);
+        p.setColor(Color.WHITE);
+        float r = Math.max(1f, digitHeight() * 0.12f * s);
+        p.setMaskFilter(new BlurMaskFilter(r, BlurMaskFilter.Blur.NORMAL));
+        int pad = (int) Math.ceil(r * 2.5f) + 2;
+        String str = String.valueOf(ch);
+        int w = Math.round(p.measureText(str)) + pad * 2;
+        int h = Math.round(getHeight() * s) + pad * 2;
+        b = Bitmap.createBitmap(Math.max(1, w), Math.max(1, h), Bitmap.Config.ALPHA_8);
+        Canvas c = new Canvas(b);
+        c.drawText(str, pad, pad + baseline() * s, p);
+        glows.put(ch, b);
+        return b;
+    }
+
+    void drawChar(Canvas canvas, char ch, float x, float dy, float scale, float pivotY,
+                  float alpha, Bitmap[] layers, float[] layerAlpha) {
+        if (alpha <= 0.004f) return;
+        int base = Math.round(255 * alphaPct / 100f);
+        canvas.save();
+        canvas.translate(0, dy);
+        if (scale != 1f) canvas.scale(scale, scale, x, pivotY);
+
+        Bitmap gl = glowSprite(ch);
+        if (gl != null) {
+            int ga = Math.round(Color.alpha(glow) * alpha * base / 255f);
+            glowPaint.setColor((Math.max(0, Math.min(255, ga)) << 24) | (glow & 0xFFFFFF));
+            int pad = (int) Math.ceil(Math.max(1f, digitHeight() * 0.12f / GLOW_SCALE) * 2.5f) + 2;
+            canvas.save();
+            canvas.translate(x - pad * GLOW_SCALE, -pad * GLOW_SCALE);
+            canvas.scale(GLOW_SCALE, GLOW_SCALE);
+            canvas.drawBitmap(gl, 0, 0, glowPaint);
+            canvas.restore();
+        }
+        int pad = spritePad();
+        for (int l = 0; l < layers.length; l++) {
+            if (layerAlpha[l] <= 0.01f) continue;
+            Bitmap sp = sprite(layers[l], ch, x);
+            if (sp == null) continue;
+            spritePaint.setAlpha(Math.max(0, Math.min(255, Math.round(base * alpha * layerAlpha[l]))));
+            canvas.drawBitmap(sp, x - pad, 0, spritePaint);
+        }
+        canvas.restore();
     }
 
     float[] positions(String s, float total) {
         float[] xs = new float[s.length()];
         float x = (getWidth() - total) / 2f;
         for (int i = 0; i < s.length(); i++) {
-            xs[i] = x;
+            xs[i] = Math.round(x);
             x += fill.measureText(s, i, i + 1);
         }
         return xs;
@@ -189,19 +350,17 @@ public class ClockView extends View {
 
     @Override
     protected void onDraw(Canvas canvas) {
-        if (text.isEmpty()) return;
+        if (text.isEmpty() || getWidth() <= 0) return;
+        usedThisFrame.clear();
         float dh = digitHeight();
-        float baseline = getHeight() / 2f + dh / 2f;
-        float top = baseline - dh;
+        float baseline = baseline();
         float shift = dh * 0.55f;
-        int base = Math.round(255 * alphaPct / 100f);
+        float pivotY = baseline - dh / 2f;
 
-        float totalNew = fill.measureText(text);
-        float[] xn = positions(text, totalNew);
+        float[] xn = positions(text, fill.measureText(text));
         float[] xo = old.isEmpty() ? xn : positions(old, fill.measureText(old));
         boolean sameLen = old.length() == text.length();
 
-        // which characters changed (in order, for a staggered roll)
         int changedCount = 0;
         int[] order = new int[text.length()];
         for (int i = 0; i < text.length(); i++) {
@@ -210,61 +369,34 @@ public class ClockView extends View {
         }
 
         Bitmap[] layers = {glassOld, glassNew};
-        float[] layerAlpha = {1f - glassMix, glassMix};
-        fill.setShadowLayer(dh * 0.12f, 0, 0, glow);
-        for (int l = 0; l < 2; l++) {
-            Bitmap g = layers[l];
-            if (layerAlpha[l] <= 0.01f) continue;
-            if (g != null) fill.setShader(glassShader(g, top, baseline + dh * 0.1f));
-            else {
-                fill.setShader(new LinearGradient(0, top, 0, baseline,
-                        new int[]{0xFFFFFFFF, 0x55FFFFFF}, null, Shader.TileMode.CLAMP));
-            }
-            float la = layerAlpha[l];
-            for (int i = 0; i < text.length(); i++) {
-                String c = text.substring(i, i + 1);
-                if (order[i] < 0 || progress >= 1f) {
-                    fill.setAlpha(Math.round(base * la));
-                    canvas.drawText(c, xn[i], baseline, fill);
-                    continue;
-                }
-                float delay = changedCount > 1 ? 0.18f * order[i] : 0f;
-                float span = 1f - 0.18f * Math.max(0, changedCount - 1);
-                float p = Math.max(0f, Math.min(1f, (progress - delay) / span));
-                // old char floats up and fades
-                if (sameLen && i < old.length()) {
-                    float po = decel.getInterpolation(p);
-                    fill.setAlpha(Math.round(base * la * (1f - po)));
-                    canvas.save();
-                    canvas.translate(0, -shift * po);
-                    canvas.scale(1f - 0.1f * po, 1f - 0.1f * po, xo[i], baseline - dh / 2f);
-                    canvas.drawText(old.substring(i, i + 1), xo[i], baseline, fill);
-                    canvas.restore();
-                }
-                // new char rolls in from below with a little bounce
-                float pn = overshoot.getInterpolation(p);
-                fill.setAlpha(Math.round(base * la * Math.min(1f, p * 1.6f)));
-                canvas.save();
-                canvas.translate(0, shift * (1f - pn));
-                canvas.drawText(c, xn[i], baseline, fill);
-                canvas.restore();
-            }
-        }
-        fill.setShader(null);
+        float[] layerAlpha = {glassOld == null ? 0f : 1f - glassMix, glassOld == null ? 1f : glassMix};
 
-        // thin glassy edge highlight
-        edge.setShader(new LinearGradient(0, top, 0, baseline,
-                new int[]{0x66FFFFFF, 0x10FFFFFF}, null, Shader.TileMode.CLAMP));
         for (int i = 0; i < text.length(); i++) {
-            float y = 0;
-            int a = 255;
-            if (order[i] >= 0 && progress < 1f) {
-                float p = Math.max(0f, Math.min(1f, progress * 1.2f - 0.2f));
-                y = shift * (1f - overshoot.getInterpolation(p));
-                a = Math.round(255 * p);
+            char c = text.charAt(i);
+            if (order[i] < 0 || progress >= 1f) {
+                drawChar(canvas, c, xn[i], 0, 1f, pivotY, 1f, layers, layerAlpha);
+                continue;
             }
-            edge.setAlpha(Math.round(a * Math.min(1f, alphaPct / 60f)));
-            canvas.drawText(text, i, i + 1, xn[i], baseline + y, edge);
+            float delay = changedCount > 1 ? 0.18f * order[i] : 0f;
+            float span = 1f - 0.18f * Math.max(0, changedCount - 1);
+            float p = Math.max(0f, Math.min(1f, (progress - delay) / span));
+            // old character floats up and fades
+            if (sameLen && i < old.length()) {
+                float po = decel.getInterpolation(p);
+                drawChar(canvas, old.charAt(i), xo[i], -shift * po, 1f - 0.1f * po, pivotY,
+                        1f - po, layers, layerAlpha);
+            }
+            // new character rolls in from below with a little bounce
+            float pn = overshoot.getInterpolation(p);
+            drawChar(canvas, c, xn[i], shift * (1f - pn), 1f, pivotY,
+                    Math.min(1f, p * 1.6f), layers, layerAlpha);
+        }
+
+        // Once everything is at rest, forget sprites that are no longer on screen.
+        if (progress >= 1f && (glassOld == null || glassMix >= 1f)) {
+            Iterator<String> it = sprites.keySet().iterator();
+            while (it.hasNext()) if (!usedThisFrame.contains(it.next())) it.remove();
+            if (glassMix >= 1f) glassOld = null;
         }
     }
 }
