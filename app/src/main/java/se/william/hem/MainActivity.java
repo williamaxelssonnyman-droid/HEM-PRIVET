@@ -13,6 +13,8 @@ import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.graphics.Canvas;
 import android.graphics.Color;
+import android.graphics.LinearGradient;
+import android.graphics.Shader;
 import android.graphics.ColorFilter;
 import android.graphics.Matrix;
 import android.graphics.Outline;
@@ -135,6 +137,13 @@ public class MainActivity extends Activity {
                 new int[]{0x55000000, 0x10000000, 0x10000000, 0xAA000000}));
         root.addView(shade, new FrameLayout.LayoutParams(-1, -1));
 
+        FrameLayout content = new FrameLayout(this);
+        content.setClipChildren(false);
+        content.setClipToPadding(false);
+        // Old TVs crop the picture edges (overscan): keep everything inside a safe area.
+        content.setPadding(dp(48), dp(27), dp(48), dp(27));
+        root.addView(content, new FrameLayout.LayoutParams(-1, -1));
+
         LinearLayout center = new LinearLayout(this);
         center.setOrientation(LinearLayout.VERTICAL);
         center.setGravity(Gravity.CENTER_HORIZONTAL);
@@ -143,47 +152,54 @@ public class MainActivity extends Activity {
         date.setFormat12Hour("EEEE, d MMMM");
         date.setFormat24Hour("EEEE, d MMMM");
         date.setTextColor(0xEEFFFFFF);
-        date.setTextSize(TypedValue.COMPLEX_UNIT_SP, 24);
+        date.setTextSize(TypedValue.COMPLEX_UNIT_SP, 22);
         date.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
         date.setShadowLayer(12, 0, 2, 0xAA000000);
         center.addView(date);
 
         clock = new TextClock(this);
         clock.setTextColor(0xF2FFFFFF);
-        clock.setTextSize(TypedValue.COMPLEX_UNIT_SP, 150);
-        clock.setTypeface(Typeface.create("sans-serif", Typeface.BOLD));
+        clock.setTextSize(TypedValue.COMPLEX_UNIT_SP, 170);
+        clock.setTypeface(Typeface.create("sans-serif-black", Typeface.NORMAL));
+        clock.setLetterSpacing(-0.02f);
+        clock.addOnLayoutChangeListener((v, l, t, r, btm, ol, ot, orr, ob) -> {
+            int h = btm - t;
+            if (h > 0) clock.getPaint().setShader(new LinearGradient(0, 0, 0, h,
+                    new int[]{0xFFFFFFFF, 0xFFE4EEF2, 0xFF9FB4BE},
+                    new float[]{0f, 0.55f, 1f}, Shader.TileMode.CLAMP));
+        });
         clock.setIncludeFontPadding(false);
         clock.setShadowLayer(30, 0, 6, 0x99000000);
         center.addView(clock);
 
         clockBox = center;
         FrameLayout.LayoutParams clp = new FrameLayout.LayoutParams(-2, -2, Gravity.CENTER_HORIZONTAL | Gravity.TOP);
-        clp.topMargin = dp(60);
-        root.addView(center, clp);
+        clp.topMargin = dp(70);
+        content.addView(center, clp);
 
         dock = new LinearLayout(this);
         dock.setOrientation(LinearLayout.HORIZONTAL);
         dock.setGravity(Gravity.CENTER_VERTICAL);
-        dock.setPadding(dp(12), dp(10), dp(12), dp(10));
+        dock.setPadding(dp(8), dp(8), dp(8), dp(8));
         dock.setClipChildren(false);
         dock.setClipToPadding(false);
         GradientDrawable glass = new GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM,
-                new int[]{0x50FFFFFF, 0x26FFFFFF});
-        glass.setCornerRadius(dp(30));
-        glass.setStroke(dp(2), 0x90E0FFF0);
+                new int[]{0x5578C8B0, 0x332A5A50, 0x44203C38});
+        glass.setCornerRadius(dp(26));
+        glass.setStroke(dp(3), 0xCCD6FFEE);
         dock.setBackground(glass);
         FrameLayout.LayoutParams dlp = new FrameLayout.LayoutParams(-2, -2, Gravity.CENTER_HORIZONTAL | Gravity.BOTTOM);
-        dlp.bottomMargin = dp(80);
-        root.addView(dock, dlp);
+        dlp.bottomMargin = dp(46);
+        content.addView(dock, dlp);
 
         label = new TextView(this);
         label.setTextColor(Color.WHITE);
-        label.setTextSize(TypedValue.COMPLEX_UNIT_SP, 18);
+        label.setTextSize(TypedValue.COMPLEX_UNIT_SP, 16);
         label.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
         label.setShadowLayer(10, 0, 2, 0xCC000000);
         FrameLayout.LayoutParams llp = new FrameLayout.LayoutParams(-2, -2, Gravity.CENTER_HORIZONTAL | Gravity.BOTTOM);
-        llp.bottomMargin = dp(40);
-        root.addView(label, llp);
+        llp.bottomMargin = dp(12);
+        content.addView(label, llp);
 
         setContentView(root);
     }
@@ -192,7 +208,7 @@ public class MainActivity extends Activity {
         final FrameLayout f = new FrameLayout(this);
         f.setFocusable(true);
         f.setClickable(true);
-        final int radius = dp(18);
+        final int radius = dp(16);
         GradientDrawable base = new GradientDrawable();
         base.setCornerRadius(radius);
         base.setColor(banner ? 0xFF202020 : 0x40FFFFFF);
@@ -208,7 +224,7 @@ public class MainActivity extends Activity {
         ImageView iv = new ImageView(this);
         iv.setImageDrawable(d);
         iv.setScaleType(banner ? ImageView.ScaleType.CENTER_CROP : ImageView.ScaleType.FIT_CENTER);
-        int pad = banner ? 0 : dp(22);
+        int pad = banner ? 0 : dp(20);
         iv.setPadding(pad, pad, pad, pad);
         f.addView(iv, new FrameLayout.LayoutParams(-1, -1));
 
@@ -217,12 +233,12 @@ public class MainActivity extends Activity {
         ring.setColor(Color.TRANSPARENT);
         ring.setStroke(dp(3), Color.WHITE);
 
-        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(dp(widthDp), dp(100));
-        lp.setMargins(dp(7), dp(6), dp(7), dp(6));
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(dp(widthDp), dp(84));
+        lp.setMargins(dp(5), dp(4), dp(5), dp(4));
         f.setLayoutParams(lp);
 
         f.setOnFocusChangeListener((v, has) -> {
-            v.animate().scaleX(has ? 1.12f : 1f).scaleY(has ? 1.12f : 1f).setDuration(140).start();
+            v.animate().scaleX(has ? 1.08f : 1f).scaleY(has ? 1.08f : 1f).setDuration(140).start();
             v.setElevation(has ? dp(10) : 0);
             f.setForeground(has ? ring : null);
             if (has) {
@@ -266,14 +282,14 @@ public class MainActivity extends Activity {
             if (!installed(p)) continue;
             final String pkg = p;
             Drawable ban = banner(pkg);
-            View t = tile(ban != null ? ban : icon(pkg), ban != null, appName(pkg), 176,
+            View t = tile(ban != null ? ban : icon(pkg), ban != null, appName(pkg), 150,
                     () -> launch(pkg), () -> appMenu(pkg), pkg);
             dock.addView(t);
             if (pkg.equals(keep)) focusTarget = t;
         }
-        View grid = tile(new DotsDrawable(), false, "Alla appar", 100, this::showAllApps, null, "#grid");
+        View grid = tile(new DotsDrawable(), false, "Alla appar", 84, this::showAllApps, null, "#grid");
         dock.addView(grid);
-        View gear = tile(new GearDrawable(), false, "Inställningar", 100, this::showSettings, null, "#gear");
+        View gear = tile(new GearDrawable(), false, "Inställningar", 84, this::showSettings, null, "#gear");
         dock.addView(gear);
         if ("#grid".equals(keep)) focusTarget = grid;
         if ("#gear".equals(keep)) focusTarget = gear;
@@ -505,18 +521,20 @@ public class MainActivity extends Activity {
     }
 
     void chooseWallpaper() {
-        String[] items = {"Nattsjö", "Norrsken", "Mörkblå", "Egen bild (bakgrund.jpg)"};
+        String[] items = {"Sjö (foto)", "Nattsjö (tecknad)", "Norrsken", "Mörkblå", "Egen bild (bakgrund.jpg)"};
         new AlertDialog.Builder(this)
                 .setTitle("Bakgrund")
                 .setItems(items, (d, w) -> {
-                    prefs.edit().putInt("bg", w == 3 ? 0 : w + 1).apply();
+                    int[] map = {4, 1, 2, 3, 0};
+                    prefs.edit().putInt("bg", map[w]).apply();
                     applyWallpaper();
                 })
                 .show();
     }
 
     void applyWallpaper() {
-        int w = prefs.getInt("bg", 1);
+        File own = new File(getExternalFilesDir(null), "bakgrund.jpg");
+        int w = prefs.getInt("bg", own.exists() ? 0 : 4);
         if (w == 0) {
             File f = new File(getExternalFilesDir(null), "bakgrund.jpg");
             Bitmap b = f.exists() ? decode(f.getAbsolutePath()) : null;
@@ -524,10 +542,10 @@ public class MainActivity extends Activity {
                 bg.setImageBitmap(b);
                 return;
             }
-            Toast.makeText(this, "Hittar ingen bakgrund.jpg – använder Nattsjö", Toast.LENGTH_LONG).show();
-            w = 1;
+            Toast.makeText(this, "Hittar ingen bakgrund.jpg – använder Sjö (foto)", Toast.LENGTH_LONG).show();
+            w = 4;
         }
-        bg.setImageResource(w == 2 ? R.drawable.bg2 : w == 3 ? R.drawable.bg3 : R.drawable.bg1);
+        bg.setImageResource(w == 4 ? R.drawable.bg_photo : w == 2 ? R.drawable.bg2 : w == 3 ? R.drawable.bg3 : R.drawable.bg1);
     }
 
     Bitmap decode(String path) {
@@ -555,11 +573,11 @@ public class MainActivity extends Activity {
 
     void startPan() {
         if (pan != null) pan.cancel();
-        bg.setScaleX(1.15f);
-        bg.setScaleY(1.15f);
+        bg.setScaleX(1.12f);
+        bg.setScaleY(1.12f);
         bg.setTranslationX(0);
         if (!prefs.getBoolean("pan", true)) return;
-        float dx = getResources().getDisplayMetrics().widthPixels * 0.06f;
+        float dx = getResources().getDisplayMetrics().widthPixels * 0.05f;
         pan = ObjectAnimator.ofFloat(bg, "translationX", -dx, dx);
         pan.setDuration(40000);
         pan.setRepeatMode(ValueAnimator.REVERSE);

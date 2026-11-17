@@ -19,6 +19,15 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.7'
+      - name: Hämta bakgrundsbilden (Higgsfield)
+        run: |
+          URL="https://d8j0ntlcm91z4.cloudfront.net/user_3LZWEcwdfRjgJGtNaXrgLUoXQzZ/hf_20261117_215700_f4e6e858-bdf9-4b57-9df9-58f3a0067f30.png"
+          if curl -fsSL -o /tmp/bg.png "$URL" && [ "$(head -c 4 /tmp/bg.png | tail -c 3)" = "PNG" ]; then
+            cp /tmp/bg.png app/src/main/res/drawable-nodpi/bg_photo.png
+            echo "Bakgrund hämtad: $(stat -c %s /tmp/bg.png) bytes"
+          else
+            echo "::warning::Kunde inte hämta bakgrunden, använder reservbild"
+          fi
       - name: Bygg APK
         run: gradle assembleDebug --no-daemon --stacktrace
       - name: Döp om
