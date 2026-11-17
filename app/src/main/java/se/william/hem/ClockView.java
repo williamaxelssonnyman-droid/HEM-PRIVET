@@ -156,11 +156,12 @@ public class ClockView extends View {
         Bitmap out = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888);
         Canvas c = new Canvas(out);
         ColorMatrix cm = new ColorMatrix();
-        cm.setSaturation(1.7f);
+        // More colour, less white: like the video, the digits take the wallpaper's hues.
+        cm.setSaturation(1.9f);
         ColorMatrix bright = new ColorMatrix(new float[]{
-                1.5f, 0, 0, 0, 70,
-                0, 1.5f, 0, 0, 70,
-                0, 0, 1.5f, 0, 75,
+                1.35f, 0, 0, 0, 45,
+                0, 1.35f, 0, 0, 45,
+                0, 0, 1.35f, 0, 55,
                 0, 0, 0, 1, 0});
         cm.postConcat(bright);
         Paint p = new Paint(Paint.FILTER_BITMAP_FLAG);

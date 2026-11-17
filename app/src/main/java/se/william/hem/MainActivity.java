@@ -7,6 +7,7 @@ import android.animation.ObjectAnimator;
 import android.animation.ValueAnimator;
 import android.app.Activity;
 import android.app.ActivityOptions;
+import android.content.ComponentName;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.pm.ApplicationInfo;
@@ -33,6 +34,9 @@ import android.graphics.drawable.ColorDrawable;
 import android.graphics.drawable.Drawable;
 import android.graphics.drawable.GradientDrawable;
 import android.graphics.drawable.StateListDrawable;
+import android.media.MediaMetadata;
+import android.media.session.MediaController;
+import android.media.session.MediaSessionManager;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
@@ -45,6 +49,7 @@ import android.view.Gravity;
 import android.view.KeyEvent;
 import android.view.PixelCopy;
 import android.view.View;
+import android.view.ViewGroup;
 import android.view.ViewAnimationUtils;
 import android.view.ViewOutlineProvider;
 import android.view.animation.AccelerateDecelerateInterpolator;
@@ -136,9 +141,7 @@ public class MainActivity extends Activity {
     boolean aOnTop = true;
     int wpIndex = -1;
     LinearLayout appsRow;
-    TextView appsTitle;
     ClockView clock;
-    TextClock date;
     FrameLayout home;
     LinearLayout bottomBar;
     boolean ambient = false;
@@ -147,6 +150,7 @@ public class MainActivity extends Activity {
         @Override
         public void run() {
             updateTime(true);
+            updateDate();
             handler.postDelayed(this, 1000);
         }
     };
@@ -178,6 +182,8 @@ public class MainActivity extends Activity {
         pm = getPackageManager();
         density = getResources().getDisplayMetrics().density;
         buildUi();
+        startSessionWatch();
+        root.getViewTreeObserver().addOnGlobalFocusChangeListener((o, n) -> hideFocusLabelIfNeeded());
         iconThread.execute(() -> {
             for (String p : allApps()) {
                 appName(p);
@@ -189,8 +195,10 @@ public class MainActivity extends Activity {
     @Override
     protected void onDestroy() {
         super.onDestroy();
+        stopSessionWatch();
         wpThread.shutdownNow();
         iconThread.shutdownNow();
+        netThread.shutdownNow();
     }
 
     @Override
@@ -199,6 +207,9 @@ public class MainActivity extends Activity {
         applyWallpaper();
         applyClock();
         animateIn = true;
+        captureSessions();
+        updateDate();
+        refreshWeather(false);
         refreshApps();
         startPan();
         scheduleRotate();
@@ -268,6 +279,17 @@ public class MainActivity extends Activity {
         return g;
     }
 
+    // Elements of the video-style layout
+    TextView dateText, weatherText;
+    ImageView weatherIcon;
+    WeatherDrawable weatherDrawable;
+    LinearLayout pills;
+    View moonBtn;
+    LinearLayout watchRow;
+    TextView watchTitle;
+    TextView focusLabel;
+    final ExecutorService netThread = Executors.newSingleThreadExecutor();
+
     void buildUi() {
         root = new FrameLayout(this);
         root.setBackgroundColor(Color.BLACK);
@@ -288,7 +310,7 @@ public class MainActivity extends Activity {
 
         View shade = new View(this);
         shade.setBackground(new GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM,
-                new int[]{0x40000000, 0x00000000, 0x10000000, 0xB0000000}));
+                new int[]{0x50000000, 0x00000000, 0x00000000, 0x30000000, 0xA8000000}));
         home.addView(shade, new FrameLayout.LayoutParams(-1, -1));
 
         FrameLayout content = new FrameLayout(this);
@@ -298,69 +320,89 @@ public class MainActivity extends Activity {
         content.setPadding(dp(48), dp(27), dp(48), dp(27));
         home.addView(content, new FrameLayout.LayoutParams(-1, -1));
 
-        // Top right: round glass buttons.
-        LinearLayout topRight = new LinearLayout(this);
-        topRight.setOrientation(LinearLayout.HORIZONTAL);
-        gridBtn = roundButton(new DotsDrawable(), "All apps", () -> showAllApps(gridBtn));
-        gearBtn = roundButton(new GearDrawable(), "Settings", () -> showSettings(gearBtn));
-        topRight.addView(gridBtn);
-        topRight.addView(gearBtn);
-        content.addView(topRight, new FrameLayout.LayoutParams(-2, -2, Gravity.TOP | Gravity.END));
+        // Top left: profile pills.
+        pills = new LinearLayout(this);
+        pills.setOrientation(LinearLayout.HORIZONTAL);
+        pills.setClipChildren(false);
+        pills.setClipToPadding(false);
+        content.addView(pills, new FrameLayout.LayoutParams(-2, -2, Gravity.TOP | Gravity.START));
+        buildPills(-1);
 
-        // Centre: date + big see-through clock.
+        // Top right: one round glass button (screensaver / ambient mode).
+        moonBtn = roundButton(new MoonDrawable(), "Screensaver", this::enterAmbient);
+        moonBtn.setLayoutParams(new FrameLayout.LayoutParams(dp(36), dp(36), Gravity.TOP | Gravity.END));
+        content.addView(moonBtn);
+
+        // Centre: date + weather, then the giant clock.
         LinearLayout center = new LinearLayout(this);
         center.setOrientation(LinearLayout.VERTICAL);
         center.setGravity(Gravity.CENTER_HORIZONTAL);
 
-        date = new TextClock(this);
-        date.setFormat12Hour("EEEE d MMMM");
-        date.setFormat24Hour("EEEE d MMMM");
-        date.setTextColor(0xD9FFFFFF);
-        date.setTextSize(TypedValue.COMPLEX_UNIT_SP, 19);
-        date.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
-        date.setShadowLayer(10, 0, 2, 0x88000000);
-        center.addView(date);
+        LinearLayout dateRow = new LinearLayout(this);
+        dateRow.setOrientation(LinearLayout.HORIZONTAL);
+        dateRow.setGravity(Gravity.CENTER_VERTICAL);
+        dateText = smallText(14, 0xF0FFFFFF, true);
+        dateRow.addView(dateText);
+        weatherDrawable = new WeatherDrawable();
+        weatherIcon = new ImageView(this);
+        weatherIcon.setImageDrawable(weatherDrawable);
+        LinearLayout.LayoutParams wil = new LinearLayout.LayoutParams(dp(16), dp(16));
+        wil.setMargins(dp(14), 0, dp(5), 0);
+        dateRow.addView(weatherIcon, wil);
+        weatherText = smallText(14, 0xE6FFFFFF, false);
+        dateRow.addView(weatherText);
+        weatherIcon.setVisibility(View.GONE);
+        weatherText.setVisibility(View.GONE);
+        center.addView(dateRow);
 
         clock = new ClockView(this);
         clock.setTypeface(clockTypeface());
-        clock.setTextSizePx(TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_SP, 290,
-                getResources().getDisplayMetrics()));
+        clock.setTextSizePx(clockTextSize());
         LinearLayout.LayoutParams clockLp = new LinearLayout.LayoutParams(-1, -2);
-        clockLp.topMargin = -dp(4);
+        clockLp.topMargin = -dp(6);
         center.addView(clock, clockLp);
 
         clockBox = center;
         FrameLayout.LayoutParams clp = new FrameLayout.LayoutParams(-1, -2, Gravity.CENTER_HORIZONTAL | Gravity.TOP);
-        clp.topMargin = dp(6);
+        clp.topMargin = dp(24);
         content.addView(center, clp);
 
-        // Bottom left: "Apps" title + row of app cards.
+        // Bottom: "Keep watching" glass cards, then the row of app icons.
         LinearLayout bottom = new LinearLayout(this);
         bottomBar = bottom;
         bottom.setOrientation(LinearLayout.VERTICAL);
         bottom.setClipChildren(false);
         bottom.setClipToPadding(false);
 
-        appsTitle = new TextView(this);
-        appsTitle.setText("Your apps");
-        appsTitle.setTextColor(0xEEFFFFFF);
-        appsTitle.setTextSize(TypedValue.COMPLEX_UNIT_SP, 17);
-        appsTitle.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
-        appsTitle.setShadowLayer(8, 0, 2, 0xAA000000);
-        appsTitle.setPadding(dp(6), 0, 0, dp(6));
-        bottom.addView(appsTitle);
+        watchTitle = smallText(13, 0xD9FFFFFF, true);
+        watchTitle.setText("Keep watching");
+        watchTitle.setPadding(dp(4), 0, 0, dp(7));
+        bottom.addView(watchTitle);
+
+        watchRow = new LinearLayout(this);
+        watchRow.setOrientation(LinearLayout.HORIZONTAL);
+        watchRow.setClipChildren(false);
+        watchRow.setClipToPadding(false);
+        bottom.addView(watchRow, new LinearLayout.LayoutParams(-1, dp(62)));
 
         HorizontalScrollView hs = new HorizontalScrollView(this);
         hs.setHorizontalScrollBarEnabled(false);
         hs.setClipChildren(false);
         hs.setClipToPadding(false);
-        hs.setPadding(0, dp(8), 0, dp(10));
+        hs.setPadding(0, dp(16), 0, dp(4));
         appsRow = new LinearLayout(this);
         appsRow.setOrientation(LinearLayout.HORIZONTAL);
         appsRow.setClipChildren(false);
         appsRow.setClipToPadding(false);
         hs.addView(appsRow);
         bottom.addView(hs);
+
+        focusLabel = smallText(12, 0xF2FFFFFF, true);
+        focusLabel.setAlpha(0f);
+        bottom.addView(focusLabel, new LinearLayout.LayoutParams(-2, -2));
+
+        gearBtn = tileButton(new GearDrawable(), "Settings", () -> showSettings(gearBtn));
+        gridBtn = tileButton(new MoreDrawable(), "All apps", () -> showAllApps(gridBtn));
 
         content.addView(bottom, new FrameLayout.LayoutParams(-1, -2, Gravity.BOTTOM | Gravity.START));
 
@@ -373,6 +415,89 @@ public class MainActivity extends Activity {
         setContentView(root);
     }
 
+    TextView smallText(int sp, int color, boolean medium) {
+        TextView t = new TextView(this);
+        t.setTextColor(color);
+        t.setTextSize(TypedValue.COMPLEX_UNIT_SP, sp);
+        t.setTypeface(Typeface.create(medium ? "sans-serif-medium" : "sans-serif", Typeface.NORMAL));
+        t.setShadowLayer(8, 0, 1, 0x99000000);
+        t.setSingleLine(true);
+        return t;
+    }
+
+    /** Text size that makes the digits about 30 % of the screen height, like in the video. */
+    float clockTextSize() {
+        Paint p = new Paint();
+        p.setTypeface(clockTypeface());
+        p.setTextSize(100f);
+        Rect r = new Rect();
+        p.getTextBounds("0123456789", 0, 10, r);
+        float target = getResources().getDisplayMetrics().heightPixels * 0.30f;
+        return r.height() > 0 ? 100f * target / r.height() : target * 1.3f;
+    }
+
+    // ---------------------------------------------------------------- profiles
+
+    String[] profileNames() {
+        return prefs.getString("profiles", "William,Guest").split(",");
+    }
+
+    int profile() {
+        return Math.max(0, Math.min(profileNames().length - 1, prefs.getInt("profile", 0)));
+    }
+
+    String dockKey() {
+        int p = profile();
+        return p == 0 ? "dock" : "dock_" + p;
+    }
+
+    void buildPills(int focusIndex) {
+        pills.removeAllViews();
+        String[] names = profileNames();
+        int cur = profile();
+        for (int i = 0; i < names.length; i++) {
+            final int idx = i;
+            boolean on = i == cur;
+            TextView t = new TextView(this);
+            t.setText(names[i]);
+            t.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
+            t.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+            t.setTextColor(on ? 0xFF0E1216 : 0xEEFFFFFF);
+            t.setPadding(dp(14), dp(5), dp(14), dp(5));
+            t.setFocusable(true);
+            t.setClickable(true);
+            GradientDrawable bg = new GradientDrawable();
+            bg.setCornerRadius(dp(14));
+            bg.setColor(on ? 0xF2FFFFFF : 0x2EFFFFFF);
+            if (!on) bg.setStroke(dp(1), 0x40FFFFFF);
+            t.setBackground(bg);
+            final GradientDrawable ring = new GradientDrawable();
+            ring.setCornerRadius(dp(14));
+            ring.setColor(Color.TRANSPARENT);
+            ring.setStroke(dp(2), Color.WHITE);
+            t.setOnFocusChangeListener((v, has) -> {
+                v.animate().scaleX(has ? 1.12f : 1f).scaleY(has ? 1.12f : 1f).setDuration(160).start();
+                v.setForeground(has && !on ? ring : null);
+            });
+            t.setOnClickListener(v -> press(v, () -> switchProfile(idx)));
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-2, -2);
+            lp.setMargins(0, 0, dp(8), 0);
+            pills.addView(t, lp);
+            if (i == focusIndex) t.post(t::requestFocus);
+        }
+    }
+
+    void switchProfile(int idx) {
+        if (idx == profile()) return;
+        prefs.edit().putInt("profile", idx).apply();
+        buildPills(idx);
+        focusPkg = null;
+        animateIn = true;
+        refreshApps();
+    }
+
+    // ---------------------------------------------------------------- buttons
+
     View roundButton(Drawable icon, String name, Runnable click) {
         FrameLayout f = new FrameLayout(this);
         f.setFocusable(true);
@@ -383,18 +508,15 @@ public class MainActivity extends Activity {
         on.setColor(0xEEFFFFFF);
         GradientDrawable off = new GradientDrawable();
         off.setShape(GradientDrawable.OVAL);
-        off.setColor(0x33FFFFFF);
-        off.setStroke(dp(1), 0x55FFFFFF);
+        off.setColor(0x2EFFFFFF);
+        off.setStroke(dp(1), 0x40FFFFFF);
         sl.addState(new int[]{android.R.attr.state_focused}, on);
         sl.addState(new int[]{}, off);
         f.setBackground(sl);
         ImageView iv = new ImageView(this);
         iv.setImageDrawable(icon);
-        iv.setPadding(dp(12), dp(12), dp(12), dp(12));
+        iv.setPadding(dp(9), dp(9), dp(9), dp(9));
         f.addView(iv, new FrameLayout.LayoutParams(-1, -1));
-        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(dp(48), dp(48));
-        lp.setMargins(dp(6), 0, 0, 0);
-        f.setLayoutParams(lp);
         f.setContentDescription(name);
         f.setOnFocusChangeListener((v, has) -> {
             v.animate().scaleX(has ? 1.15f : 1f).scaleY(has ? 1.15f : 1f).setDuration(160).start();
@@ -403,6 +525,122 @@ public class MainActivity extends Activity {
         iv.setColorFilter(Color.WHITE);
         f.setOnClickListener(v -> press(v, click));
         return f;
+    }
+
+    static final int TILE_DP = 58;
+
+    /** Rounded-square tile like the app icons, used for ⚙ and ⋯ at the end of the row. */
+    View tileButton(Drawable icon, String name, Runnable click) {
+        FrameLayout f = new FrameLayout(this);
+        f.setFocusable(true);
+        f.setClickable(true);
+        f.setBackground(glass(14, 0x2EFFFFFF));
+        ImageView iv = new ImageView(this);
+        iv.setImageDrawable(icon);
+        iv.setPadding(dp(17), dp(17), dp(17), dp(17));
+        iv.setColorFilter(Color.WHITE);
+        f.addView(iv, new FrameLayout.LayoutParams(-1, -1));
+        f.setContentDescription(name);
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(dp(TILE_DP), dp(TILE_DP));
+        lp.setMargins(dp(5), 0, dp(5), 0);
+        f.setLayoutParams(lp);
+        final GradientDrawable ring = new GradientDrawable();
+        ring.setCornerRadius(dp(14));
+        ring.setColor(Color.TRANSPARENT);
+        ring.setStroke(dp(2), Color.WHITE);
+        f.setOnFocusChangeListener((v, has) -> {
+            v.animate().scaleX(has ? 1.14f : 1f).scaleY(has ? 1.14f : 1f).setDuration(200)
+                    .setInterpolator(new OvershootInterpolator(1.4f)).start();
+            f.setForeground(has ? ring : null);
+            if (has) showFocusLabel(v, name);
+        });
+        f.setOnClickListener(v -> press(v, click));
+        return f;
+    }
+
+    /** App icon tile for the bottom row. */
+    View appTile(String pkg) {
+        final FrameLayout f = new FrameLayout(this);
+        f.setFocusable(true);
+        f.setClickable(true);
+        final int radius = dp(14);
+        f.setBackground(glass(14, 0x2EFFFFFF));
+        f.setOutlineProvider(new ViewOutlineProvider() {
+            @Override
+            public void getOutline(View v, Outline o) {
+                o.setRoundRect(0, 0, v.getWidth(), v.getHeight(), radius);
+            }
+        });
+        f.setClipToOutline(true);
+        ImageView iv = new ImageView(this);
+        Drawable ic = icon(pkg);
+        if (Build.VERSION.SDK_INT >= 26 && ic instanceof android.graphics.drawable.AdaptiveIconDrawable) {
+            // Show adaptive icons full-bleed, like a square app tile.
+            android.graphics.drawable.AdaptiveIconDrawable a = (android.graphics.drawable.AdaptiveIconDrawable) ic;
+            Drawable[] layers = a.getBackground() != null
+                    ? new Drawable[]{a.getBackground(), a.getForeground()}
+                    : new Drawable[]{a.getForeground()};
+            iv.setImageDrawable(new android.graphics.drawable.LayerDrawable(layers));
+            iv.setScaleType(ImageView.ScaleType.FIT_XY);
+            iv.setScaleX(1.45f);
+            iv.setScaleY(1.45f);
+        } else {
+            iv.setImageDrawable(ic);
+            iv.setScaleType(ImageView.ScaleType.FIT_CENTER);
+            iv.setPadding(dp(6), dp(6), dp(6), dp(6));
+        }
+        f.addView(iv, new FrameLayout.LayoutParams(-1, -1));
+        final GradientDrawable ring = new GradientDrawable();
+        ring.setCornerRadius(radius);
+        ring.setColor(Color.TRANSPARENT);
+        ring.setStroke(dp(2), Color.WHITE);
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(dp(TILE_DP), dp(TILE_DP));
+        lp.setMargins(dp(5), 0, dp(5), 0);
+        f.setLayoutParams(lp);
+        final String name = appName(pkg);
+        f.setOnFocusChangeListener((v, has) -> {
+            v.animate().scaleX(has ? 1.14f : 1f).scaleY(has ? 1.14f : 1f).setDuration(200)
+                    .setInterpolator(new OvershootInterpolator(1.4f)).start();
+            f.setForeground(has ? ring : null);
+            v.setElevation(has ? dp(10) : 0);
+            if (has) {
+                focusPkg = pkg;
+                showFocusLabel(v, name);
+            }
+        });
+        f.setOnClickListener(v -> press(v, () -> launch(pkg, v)));
+        f.setOnLongClickListener(v -> {
+            appMenu(pkg, v);
+            return true;
+        });
+        return f;
+    }
+
+    /** The small name under the focused icon slides along with the focus. */
+    void showFocusLabel(View tile, String name) {
+        focusLabel.setText(name);
+        focusLabel.post(() -> {
+            int[] t = new int[2];
+            int[] b = new int[2];
+            tile.getLocationInWindow(t);
+            bottomBar.getLocationInWindow(b);
+            // undo the tile's own focus scale when measuring its centre
+            float cx = t[0] + tile.getWidth() * tile.getScaleX() / 2f - b[0];
+            float x = cx - focusLabel.getWidth() / 2f;
+            if (focusLabel.getAlpha() < 0.05f) {
+                focusLabel.setTranslationX(x);
+                focusLabel.animate().alpha(1f).setDuration(200).start();
+            } else {
+                focusLabel.animate().translationX(x).alpha(1f).setDuration(220)
+                        .setInterpolator(new DecelerateInterpolator(2f)).start();
+            }
+        });
+    }
+
+    void hideFocusLabelIfNeeded() {
+        View f = getCurrentFocus();
+        boolean inRow = f != null && (f.getParent() == appsRow);
+        if (!inRow) focusLabel.animate().alpha(0f).setDuration(150).start();
     }
 
     // ---------------------------------------------------------------- animation helpers
@@ -452,8 +690,10 @@ public class MainActivity extends Activity {
         clockBox.setScaleY(0.92f);
         clockBox.animate().alpha(1f).scaleX(1f).scaleY(1f).setDuration(1100)
                 .setInterpolator(new DecelerateInterpolator(2f)).withLayer().start();
-        appsTitle.setAlpha(0f);
-        appsTitle.animate().alpha(1f).setStartDelay(200).setDuration(600).start();
+        for (View v : new View[]{pills, moonBtn}) {
+            v.setAlpha(0f);
+            v.animate().alpha(1f).setStartDelay(200).setDuration(600).start();
+        }
     }
 
     // ---------------------------------------------------------------- clock
@@ -489,8 +729,8 @@ public class MainActivity extends Activity {
         ambient = true;
         bottomBar.animate().alpha(0f).translationY(dp(60)).setDuration(1200)
                 .setInterpolator(new AccelerateDecelerateInterpolator()).withLayer().start();
-        gridBtn.animate().alpha(0f).setDuration(800).start();
-        gearBtn.animate().alpha(0f).setDuration(800).start();
+        pills.animate().alpha(0f).setDuration(800).start();
+        moonBtn.animate().alpha(0f).setDuration(800).start();
         clockBox.animate().translationY(dp(70)).scaleX(1.06f).scaleY(1.06f).setDuration(1600)
                 .setInterpolator(new AccelerateDecelerateInterpolator()).withLayer().start();
     }
@@ -500,8 +740,8 @@ public class MainActivity extends Activity {
         long d = animate ? 600 : 0;
         bottomBar.animate().alpha(1f).translationY(0).setDuration(d)
                 .setInterpolator(new DecelerateInterpolator(2f)).withLayer().start();
-        gridBtn.animate().alpha(1f).setDuration(d).start();
-        gearBtn.animate().alpha(1f).setDuration(d).start();
+        pills.animate().alpha(1f).setDuration(d).start();
+        moonBtn.animate().alpha(1f).setDuration(d).start();
         clockBox.animate().translationY(0).scaleX(1f).scaleY(1f).setDuration(d)
                 .setInterpolator(new DecelerateInterpolator(2f)).withLayer().start();
         scheduleAmbient();
@@ -837,10 +1077,7 @@ public class MainActivity extends Activity {
                 v.setOutlineAmbientShadowColor(tint);
             }
             f.setForeground(has ? ring : null);
-            if (has) {
-                appsTitle.setText(name);
-                focusPkg = pkg;
-            }
+            if (has) focusPkg = pkg;
         });
         f.setOnClickListener(v -> press(v, () -> launch(pkg, v)));
         f.setOnLongClickListener(v -> {
@@ -851,7 +1088,7 @@ public class MainActivity extends Activity {
     }
 
     List<String> getDock() {
-        String s = prefs.getString("dock", null);
+        String s = prefs.getString(dockKey(), null);
         List<String> out = new ArrayList<>();
         if (s == null) {
             for (String p : DEFAULT_DOCK) if (installed(p)) out.add(p);
@@ -863,7 +1100,7 @@ public class MainActivity extends Activity {
     }
 
     void saveDock(List<String> l) {
-        prefs.edit().putString("dock", String.join(",", l)).apply();
+        prefs.edit().putString(dockKey(), String.join(",", l)).apply();
     }
 
     void refreshApps() {
@@ -873,28 +1110,32 @@ public class MainActivity extends Activity {
         int i = 0;
         for (String p : getDock()) {
             if (!installed(p)) continue;
-            final String pkg = p;
-            final View[] holder = new View[1];
-            View t = appCard(pkg, 176, 99, () -> appMenu(pkg, holder[0]));
-            holder[0] = t;
+            View t = appTile(p);
             appsRow.addView(t);
-            if (pkg.equals(keep)) focusTarget = t;
-            if (animateIn) {
-                t.setAlpha(0f);
-                t.setTranslationY(dp(40));
-                t.animate().alpha(1f).translationY(0).setStartDelay(150 + i * 70L).setDuration(520)
-                        .setInterpolator(new DecelerateInterpolator(2f)).withLayer().start();
-            }
-            i++;
+            if (p.equals(keep)) focusTarget = t;
+            animateTile(t, i++);
         }
+        for (View b : new View[]{gearBtn, gridBtn}) {
+            if (b.getParent() != null) ((ViewGroup) b.getParent()).removeView(b);
+            appsRow.addView(b);
+            animateTile(b, i++);
+        }
+        refreshWatch();
         animateIn = false;
-        appsTitle.setText("Your apps");
         final View ft = focusTarget;
         appsRow.post(() -> {
             if (overlay != null || panel != null) return;
             if (ft != null) ft.requestFocus();
             else focusFirst();
         });
+    }
+
+    void animateTile(View t, int i) {
+        if (!animateIn) return;
+        t.setAlpha(0f);
+        t.setTranslationY(dp(30));
+        t.animate().alpha(1f).translationY(0).setStartDelay(260 + i * 45L).setDuration(480)
+                .setInterpolator(new DecelerateInterpolator(2f)).withLayer().start();
     }
 
     void focusFirst() {
@@ -1107,7 +1348,6 @@ public class MainActivity extends Activity {
             final View f = first;
             overlay.postDelayed(f::requestFocus, 120);
         }
-        appsTitle.setText("Your apps");
     }
 
     void closeOverlay(boolean animate) {
@@ -1361,11 +1601,23 @@ public class MainActivity extends Activity {
         }));
         items.add(new Item("Ambient mode after 1 min", amb ? "On" : "Off", true, () ->
                 prefs.edit().putBoolean("ambient", !amb).apply()));
+        boolean wx = prefs.getBoolean("weather", true);
+        items.add(new Item("Weather", wx ? "On" : "Off", true, () -> {
+            prefs.edit().putBoolean("weather", !wx).apply();
+            refreshWeather(true);
+        }));
+        boolean media = hasMediaAccess();
+        items.add(new Item("Keep watching titles", media ? "On" : "Set up", true, () -> {
+            if (!media) Toast.makeText(this, "Run on your PC: adb shell cmd notification allow_listener "
+                    + "se.william.hem/se.william.hem.MediaListener", Toast.LENGTH_LONG).show();
+            captureSessions();
+            refreshWatch();
+        }));
         items.add(new Item("Home button", "Set up", false,
                 () -> openSafe(new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))));
         items.add(new Item("Android settings", "Open", false, () -> openSafe(new Intent(Settings.ACTION_SETTINGS))));
         items.add(new Item("Reset apps", "Default", true, () -> {
-            prefs.edit().remove("dock").apply();
+            prefs.edit().remove(dockKey()).apply();
             refreshApps();
         }));
         return items;
@@ -1411,6 +1663,457 @@ public class MainActivity extends Activity {
         } catch (Exception e) {
             Toast.makeText(this, "Couldn't open settings", Toast.LENGTH_SHORT).show();
         }
+    }
+
+    // ---------------------------------------------------------------- keep watching
+
+    MediaSessionManager.OnActiveSessionsChangedListener sessionListener;
+
+    ComponentName listenerComponent() {
+        return new ComponentName(this, MediaListener.class);
+    }
+
+    void startSessionWatch() {
+        try {
+            MediaSessionManager msm = (MediaSessionManager) getSystemService(MEDIA_SESSION_SERVICE);
+            sessionListener = controllers -> {
+                if (controllers != null) saveSessions(controllers);
+                refreshWatch();
+            };
+            msm.addOnActiveSessionsChangedListener(sessionListener, listenerComponent(), handler);
+        } catch (Throwable ignored) {
+            sessionListener = null; // listener not enabled yet: fall back to app cards
+        }
+    }
+
+    void stopSessionWatch() {
+        if (sessionListener == null) return;
+        try {
+            ((MediaSessionManager) getSystemService(MEDIA_SESSION_SERVICE)).removeOnActiveSessionsChangedListener(sessionListener);
+        } catch (Throwable ignored) {
+        }
+    }
+
+    boolean hasMediaAccess() {
+        try {
+            ((MediaSessionManager) getSystemService(MEDIA_SESSION_SERVICE)).getActiveSessions(listenerComponent());
+            return true;
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
+    void captureSessions() {
+        try {
+            MediaSessionManager msm = (MediaSessionManager) getSystemService(MEDIA_SESSION_SERVICE);
+            saveSessions(msm.getActiveSessions(listenerComponent()));
+            if (sessionListener == null) startSessionWatch();
+        } catch (Throwable ignored) {
+        }
+    }
+
+    static String firstText(MediaMetadata md, String... keys) {
+        for (String k : keys) {
+            CharSequence c = md.getText(k);
+            if (c != null && c.toString().trim().length() > 0) return c.toString().trim();
+        }
+        return null;
+    }
+
+    static Bitmap firstBitmap(MediaMetadata md, String... keys) {
+        for (String k : keys) {
+            Bitmap b = md.getBitmap(k);
+            if (b != null && !b.isRecycled()) return b;
+        }
+        return null;
+    }
+
+    File artFile(String pkg) {
+        return new File(getFilesDir(), "kw_" + pkg + ".jpg");
+    }
+
+    /** Remembers what each app was last playing, newest first. */
+    void saveSessions(List<MediaController> list) {
+        List<String> order = new ArrayList<>(watchOrder());
+        for (int i = list.size() - 1; i >= 0; i--) {
+            MediaController mc = list.get(i);
+            String pkg = mc.getPackageName();
+            if (pkg == null || pkg.equals(getPackageName())) continue;
+            MediaMetadata md = mc.getMetadata();
+            if (md == null) continue;
+            String title = firstText(md, MediaMetadata.METADATA_KEY_DISPLAY_TITLE, MediaMetadata.METADATA_KEY_TITLE);
+            if (title == null) continue;
+            String sub = firstText(md, MediaMetadata.METADATA_KEY_DISPLAY_SUBTITLE,
+                    MediaMetadata.METADATA_KEY_ARTIST, MediaMetadata.METADATA_KEY_ALBUM);
+            String oldTitle = prefs.getString("kw_t_" + pkg, null);
+            prefs.edit().putString("kw_t_" + pkg, title)
+                    .putString("kw_s_" + pkg, sub == null ? "" : sub)
+                    .putLong("kw_at_" + pkg, System.currentTimeMillis()).apply();
+            order.remove(pkg);
+            order.add(0, pkg);
+            Bitmap art = firstBitmap(md, MediaMetadata.METADATA_KEY_ART, MediaMetadata.METADATA_KEY_ALBUM_ART,
+                    MediaMetadata.METADATA_KEY_DISPLAY_ICON);
+            final File f = artFile(pkg);
+            if (art != null) {
+                float s = Math.min(1f, 360f / Math.max(art.getWidth(), art.getHeight()));
+                final Bitmap small = Bitmap.createScaledBitmap(art, Math.max(1, Math.round(art.getWidth() * s)),
+                        Math.max(1, Math.round(art.getHeight() * s)), true);
+                wpThread.execute(() -> {
+                    try (java.io.FileOutputStream out = new java.io.FileOutputStream(f)) {
+                        small.compress(Bitmap.CompressFormat.JPEG, 88, out);
+                    } catch (Exception ignored) {
+                    }
+                    handler.post(this::refreshWatch);
+                });
+            } else if (!title.equals(oldTitle)) {
+                //noinspection ResultOfMethodCallIgnored
+                f.delete();
+            }
+        }
+        while (order.size() > 8) order.remove(order.size() - 1);
+        prefs.edit().putString("kw_order", String.join(",", order)).apply();
+    }
+
+    List<String> watchOrder() {
+        String s = prefs.getString("kw_order", "");
+        List<String> l = new ArrayList<>();
+        for (String p : s.split(",")) if (!p.isEmpty() && installed(p)) l.add(p);
+        return l;
+    }
+
+    void refreshWatch() {
+        if (watchRow == null) return;
+        watchRow.removeAllViews();
+        List<String> shown = new ArrayList<>();
+        int i = 0;
+        for (String pkg : watchOrder()) {
+            if (shown.size() >= 3) break;
+            String title = prefs.getString("kw_t_" + pkg, null);
+            if (title == null) continue;
+            Bitmap art = null;
+            File f = artFile(pkg);
+            if (f.exists()) art = BitmapFactory.decodeFile(f.getAbsolutePath());
+            addWatchCard(pkg, appName(pkg).toUpperCase(Locale.ROOT), title, art, i++);
+            shown.add(pkg);
+        }
+        // Not enough history yet: fill with your apps so the row always looks complete.
+        for (String pkg : getDock()) {
+            if (shown.size() >= 3) break;
+            if (shown.contains(pkg) || !installed(pkg)) continue;
+            addWatchCard(pkg, "OPEN APP", appName(pkg), null, i++);
+            shown.add(pkg);
+        }
+    }
+
+    void addWatchCard(String pkg, String label, String title, Bitmap art, int index) {
+        final LinearLayout card = new LinearLayout(this);
+        card.setOrientation(LinearLayout.HORIZONTAL);
+        card.setGravity(Gravity.CENTER_VERTICAL);
+        card.setFocusable(true);
+        card.setClickable(true);
+        card.setPadding(dp(8), dp(7), dp(14), dp(7));
+        GradientDrawable bg = new GradientDrawable();
+        bg.setCornerRadius(dp(14));
+        bg.setColor(0x52101419);
+        bg.setStroke(dp(1), 0x2EFFFFFF);
+        card.setBackground(bg);
+
+        // thumbnail
+        final int r = dp(8);
+        ImageView thumb = new ImageView(this);
+        thumb.setScaleType(ImageView.ScaleType.CENTER_CROP);
+        if (art != null) thumb.setImageBitmap(art);
+        else {
+            Drawable ban = banner(pkg);
+            thumb.setImageDrawable(ban != null ? ban : icon(pkg));
+            if (ban == null) thumb.setScaleType(ImageView.ScaleType.FIT_CENTER);
+        }
+        thumb.setBackgroundColor(0x33000000);
+        thumb.setOutlineProvider(new ViewOutlineProvider() {
+            @Override
+            public void getOutline(View v, Outline o) {
+                o.setRoundRect(0, 0, v.getWidth(), v.getHeight(), r);
+            }
+        });
+        thumb.setClipToOutline(true);
+        card.addView(thumb, new LinearLayout.LayoutParams(dp(84), -1));
+
+        LinearLayout col = new LinearLayout(this);
+        col.setOrientation(LinearLayout.VERTICAL);
+        col.setPadding(dp(12), 0, 0, 0);
+        LinearLayout top = new LinearLayout(this);
+        top.setOrientation(LinearLayout.HORIZONTAL);
+        top.setGravity(Gravity.CENTER_VERTICAL);
+        ImageView small = new ImageView(this);
+        small.setImageDrawable(icon(pkg));
+        LinearLayout.LayoutParams sl = new LinearLayout.LayoutParams(dp(12), dp(12));
+        sl.setMargins(0, 0, dp(5), 0);
+        top.addView(small, sl);
+        TextView lab = smallText(10, 0xB3FFFFFF, true);
+        lab.setText(label);
+        lab.setLetterSpacing(0.08f);
+        lab.setShadowLayer(0, 0, 0, 0);
+        top.addView(lab);
+        col.addView(top);
+        TextView t = smallText(15, Color.WHITE, true);
+        t.setText(title);
+        t.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        t.setShadowLayer(0, 0, 0, 0);
+        t.setTypeface(Typeface.create("sans-serif", Typeface.BOLD));
+        col.addView(t);
+        card.addView(col, new LinearLayout.LayoutParams(0, -2, 1f));
+
+        final GradientDrawable ring = new GradientDrawable();
+        ring.setCornerRadius(dp(14));
+        ring.setColor(Color.TRANSPARENT);
+        ring.setStroke(dp(2), Color.WHITE);
+        card.setOnFocusChangeListener((v, has) -> {
+            v.animate().scaleX(has ? 1.05f : 1f).scaleY(has ? 1.05f : 1f).setDuration(200)
+                    .setInterpolator(new OvershootInterpolator(1.2f)).start();
+            card.setForeground(has ? ring : null);
+            bg.setColor(has ? 0x80202833 : 0x52101419);
+        });
+        card.setOnClickListener(v -> press(v, () -> launch(pkg, v)));
+
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, -1, 1f);
+        lp.setMargins(index == 0 ? dp(4) : dp(6), 0, dp(6), 0);
+        if (animateIn) {
+            card.setAlpha(0f);
+            card.setTranslationY(dp(24));
+            card.animate().alpha(1f).translationY(0).setStartDelay(120 + index * 80L).setDuration(520)
+                    .setInterpolator(new DecelerateInterpolator(2f)).withLayer().start();
+        }
+        watchRow.addView(card, lp);
+    }
+
+    // ---------------------------------------------------------------- date + weather
+
+    String lastDate = "";
+
+    void updateDate() {
+        String d = new SimpleDateFormat("EEEE d MMMM", Locale.ENGLISH).format(new Date());
+        if (!d.equals(lastDate)) {
+            lastDate = d;
+            dateText.setText(d);
+        }
+    }
+
+    static String weatherWord(int code) {
+        if (code == 0) return "Clear";
+        if (code == 1) return "Mostly clear";
+        if (code == 2) return "Partly cloudy";
+        if (code == 3) return "Cloudy";
+        if (code == 45 || code == 48) return "Fog";
+        if (code >= 51 && code <= 57) return "Drizzle";
+        if (code >= 61 && code <= 67) return "Rain";
+        if (code >= 71 && code <= 77) return "Snow";
+        if (code >= 80 && code <= 82) return "Showers";
+        if (code == 85 || code == 86) return "Snow showers";
+        if (code >= 95) return "Thunderstorm";
+        return "";
+    }
+
+    void showWeather() {
+        if (!prefs.contains("wxT") || !prefs.getBoolean("weather", true)) {
+            weatherIcon.setVisibility(View.GONE);
+            weatherText.setVisibility(View.GONE);
+            return;
+        }
+        int code = prefs.getInt("wxC", 3);
+        weatherDrawable.set(code, prefs.getInt("wxDay", 1) == 1);
+        weatherText.setText(prefs.getInt("wxT", 0) + "°  " + weatherWord(code));
+        if (weatherText.getVisibility() != View.VISIBLE) {
+            weatherIcon.setVisibility(View.VISIBLE);
+            weatherText.setVisibility(View.VISIBLE);
+            weatherIcon.setAlpha(0f);
+            weatherText.setAlpha(0f);
+            weatherIcon.animate().alpha(1f).setDuration(500).start();
+            weatherText.animate().alpha(1f).setDuration(500).start();
+        }
+    }
+
+    void refreshWeather(boolean force) {
+        showWeather();
+        if (!prefs.getBoolean("weather", true)) return;
+        if (!force && System.currentTimeMillis() - prefs.getLong("wxAt", 0) < 30 * 60_000L) return;
+        netThread.execute(() -> {
+            try {
+                if (!prefs.contains("lat")) {
+                    double lat = 59.3293, lon = 18.0686; // Stockholm if the lookup fails
+                    for (String url : new String[]{"https://ipwho.is/", "https://ipapi.co/json/"}) {
+                        try {
+                            org.json.JSONObject j = getJson(url);
+                            if (j.has("latitude")) {
+                                lat = j.getDouble("latitude");
+                                lon = j.getDouble("longitude");
+                                break;
+                            }
+                        } catch (Exception ignored) {
+                        }
+                    }
+                    prefs.edit().putFloat("lat", (float) lat).putFloat("lon", (float) lon).apply();
+                }
+                String url = String.format(Locale.US,
+                        "https://api.open-meteo.com/v1/forecast?latitude=%.4f&longitude=%.4f&current=temperature_2m,weather_code,is_day&timezone=auto",
+                        prefs.getFloat("lat", 59.33f), prefs.getFloat("lon", 18.07f));
+                org.json.JSONObject cur = getJson(url).getJSONObject("current");
+                prefs.edit().putInt("wxT", (int) Math.round(cur.getDouble("temperature_2m")))
+                        .putInt("wxC", cur.getInt("weather_code"))
+                        .putInt("wxDay", cur.optInt("is_day", 1))
+                        .putLong("wxAt", System.currentTimeMillis()).apply();
+                handler.post(this::showWeather);
+            } catch (Exception ignored) {
+            }
+        });
+    }
+
+    static org.json.JSONObject getJson(String url) throws Exception {
+        java.net.HttpURLConnection c = (java.net.HttpURLConnection) new java.net.URL(url).openConnection();
+        c.setConnectTimeout(8000);
+        c.setReadTimeout(8000);
+        c.setRequestProperty("User-Agent", "se.william.hem");
+        try (java.io.InputStream in = c.getInputStream()) {
+            java.io.ByteArrayOutputStream bo = new java.io.ByteArrayOutputStream();
+            byte[] buf = new byte[4096];
+            int n;
+            while ((n = in.read(buf)) > 0) bo.write(buf, 0, n);
+            return new org.json.JSONObject(bo.toString("UTF-8"));
+        } finally {
+            c.disconnect();
+        }
+    }
+
+    // ---------------------------------------------------------------- small line icons
+
+    class WeatherDrawable extends Drawable {
+        final Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
+        int code = 3;
+        boolean day = true;
+
+        WeatherDrawable() {
+            p.setColor(Color.WHITE);
+            p.setStyle(Paint.Style.STROKE);
+            p.setStrokeCap(Paint.Cap.ROUND);
+            p.setStrokeJoin(Paint.Join.ROUND);
+        }
+
+        void set(int code, boolean day) {
+            this.code = code;
+            this.day = day;
+            invalidateSelf();
+        }
+
+        Path cloud(float x, float y, float w) {
+            Path a = new Path();
+            a.addCircle(x + w * 0.30f, y + w * 0.42f, w * 0.20f, Path.Direction.CW);
+            Path b = new Path();
+            b.addCircle(x + w * 0.56f, y + w * 0.32f, w * 0.26f, Path.Direction.CW);
+            Path c = new Path();
+            c.addRoundRect(new RectF(x + w * 0.08f, y + w * 0.40f, x + w * 0.92f, y + w * 0.62f), w * 0.11f, w * 0.11f, Path.Direction.CW);
+            a.op(b, Path.Op.UNION);
+            a.op(c, Path.Op.UNION);
+            return a;
+        }
+
+        @Override
+        public void draw(Canvas c) {
+            Rect b = getBounds();
+            float s = Math.min(b.width(), b.height());
+            float x = b.left, y = b.top;
+            p.setStrokeWidth(Math.max(1.5f, s * 0.08f));
+            boolean clear = code <= 1;
+            boolean partly = code == 2;
+            boolean rain = (code >= 51 && code <= 67) || (code >= 80 && code <= 82) || code >= 95;
+            boolean snow = (code >= 71 && code <= 77) || code == 85 || code == 86;
+            if (clear || partly) {
+                float cx = x + s * (partly ? 0.36f : 0.5f), cy = y + s * (partly ? 0.34f : 0.5f);
+                float r = s * (partly ? 0.16f : 0.22f);
+                if (day) {
+                    c.drawCircle(cx, cy, r, p);
+                    for (int i = 0; i < 8; i++) {
+                        double a = Math.PI / 4 * i;
+                        c.drawLine(cx + (float) Math.cos(a) * r * 1.5f, cy + (float) Math.sin(a) * r * 1.5f,
+                                cx + (float) Math.cos(a) * r * 1.95f, cy + (float) Math.sin(a) * r * 1.95f, p);
+                    }
+                } else {
+                    Path m = new Path();
+                    m.addCircle(cx, cy, r * 1.3f, Path.Direction.CW);
+                    Path cut = new Path();
+                    cut.addCircle(cx + r * 0.7f, cy - r * 0.5f, r * 1.1f, Path.Direction.CW);
+                    m.op(cut, Path.Op.DIFFERENCE);
+                    c.drawPath(m, p);
+                }
+                if (clear) return;
+            }
+            float off = partly ? s * 0.12f : 0f;
+            float top = rain || snow ? y - s * 0.08f : y + off * 0.6f;
+            c.drawPath(cloud(x + off, top, s - off), p);
+            if (rain) {
+                for (int i = 0; i < 3; i++) {
+                    float lx = x + s * (0.32f + 0.18f * i);
+                    c.drawLine(lx, y + s * 0.70f, lx - s * 0.06f, y + s * 0.88f, p);
+                }
+            } else if (snow) {
+                Paint dot = new Paint(p);
+                dot.setStyle(Paint.Style.FILL);
+                for (int i = 0; i < 3; i++) c.drawCircle(x + s * (0.32f + 0.18f * i), y + s * 0.80f, s * 0.05f, dot);
+            }
+        }
+
+        @Override public int getIntrinsicWidth() { return dp(16); }
+        @Override public int getIntrinsicHeight() { return dp(16); }
+        @Override public void setAlpha(int a) { p.setAlpha(a); }
+        @Override public void setColorFilter(ColorFilter cf) { p.setColorFilter(cf); }
+        @Override public int getOpacity() { return PixelFormat.TRANSLUCENT; }
+    }
+
+    class MoreDrawable extends Drawable {
+        final Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
+
+        MoreDrawable() {
+            p.setColor(Color.WHITE);
+        }
+
+        @Override
+        public void draw(Canvas c) {
+            Rect b = getBounds();
+            float s = Math.min(b.width(), b.height());
+            float r = s * 0.09f;
+            for (int i = -1; i <= 1; i++) c.drawCircle(b.exactCenterX() + i * s * 0.3f, b.exactCenterY(), r, p);
+        }
+
+        @Override public int getIntrinsicWidth() { return dp(24); }
+        @Override public int getIntrinsicHeight() { return dp(24); }
+        @Override public void setAlpha(int a) { p.setAlpha(a); }
+        @Override public void setColorFilter(ColorFilter cf) { p.setColorFilter(cf); }
+        @Override public int getOpacity() { return PixelFormat.TRANSLUCENT; }
+    }
+
+    class MoonDrawable extends Drawable {
+        final Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
+
+        MoonDrawable() {
+            p.setColor(Color.WHITE);
+        }
+
+        @Override
+        public void draw(Canvas c) {
+            Rect b = getBounds();
+            float s = Math.min(b.width(), b.height());
+            float cx = b.exactCenterX(), cy = b.exactCenterY();
+            Path m = new Path();
+            m.addCircle(cx, cy, s * 0.40f, Path.Direction.CW);
+            Path cut = new Path();
+            cut.addCircle(cx + s * 0.20f, cy - s * 0.16f, s * 0.33f, Path.Direction.CW);
+            m.op(cut, Path.Op.DIFFERENCE);
+            c.drawPath(m, p);
+        }
+
+        @Override public int getIntrinsicWidth() { return dp(24); }
+        @Override public int getIntrinsicHeight() { return dp(24); }
+        @Override public void setAlpha(int a) { p.setAlpha(a); }
+        @Override public void setColorFilter(ColorFilter cf) { p.setColorFilter(cf); }
+        @Override public int getOpacity() { return PixelFormat.TRANSLUCENT; }
     }
 
     // ---------------------------------------------------------------- icons
