@@ -238,7 +238,7 @@ public class ClockView extends View {
         float baseline = baseline();
         float top = baseline - dh;
         Shader fade = new LinearGradient(0, top, 0, baseline + dh * 0.1f,
-                new int[]{0xFFFFFFFF, 0xF0FFFFFF, 0x26FFFFFF},
+                new int[]{0xFFFFFFFF, 0xF5FFFFFF, 0x80FFFFFF},
                 new float[]{0f, 0.5f, 1f}, Shader.TileMode.CLAMP);
         if (g == null) {
             return new LinearGradient(0, top, 0, baseline,
@@ -280,12 +280,10 @@ public class ClockView extends View {
         fill.setAlpha(255);
         c.drawText(s, x, baseline, fill);
         fill.setShader(null);
-        // Thin glassy edge. The whole sprite is later drawn at the clock's transparency,
-        // so boost the edge to keep it about as visible as before.
-        float boost = Math.min(1f, alphaPct / 60f) / Math.max(0.15f, alphaPct / 100f);
-        edge.setShader(new LinearGradient(0, baseline - dh, 0, baseline,
-                new int[]{0x66FFFFFF, 0x10FFFFFF}, null, Shader.TileMode.CLAMP));
-        edge.setAlpha(Math.min(255, Math.round(255 * boost)));
+        // Very faint glassy edge on the top half only: the fill carries the look, not an outline.
+        edge.setShader(new LinearGradient(0, baseline - dh, 0, baseline - dh * 0.4f,
+                new int[]{0x40FFFFFF, 0x00FFFFFF}, null, Shader.TileMode.CLAMP));
+        edge.setAlpha(255);
         c.drawText(s, x, baseline, edge);
         edge.setShader(null);
         sprites.put(key, b);

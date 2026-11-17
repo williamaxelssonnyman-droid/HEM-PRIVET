@@ -264,7 +264,7 @@ public class MainActivity extends Activity {
     Typeface clockTypeface() {
         try {
             Typeface t = new Typeface.Builder(getAssets(), "fonts/clock.ttf")
-                    .setFontVariationSettings("'wght' 300").build();
+                    .setFontVariationSettings("'wght' 400").build();
             if (t != null) return t;
         } catch (Throwable ignored) {
         }
@@ -281,6 +281,7 @@ public class MainActivity extends Activity {
 
     // Elements of the video-style layout
     TextView dateText, weatherText;
+    View dimView;
     ImageView weatherIcon;
     WeatherDrawable weatherDrawable;
     LinearLayout pills;
@@ -310,8 +311,13 @@ public class MainActivity extends Activity {
 
         View shade = new View(this);
         shade.setBackground(new GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM,
-                new int[]{0x50000000, 0x00000000, 0x00000000, 0x30000000, 0xA8000000}));
+                new int[]{0x59000000, 0x00000000, 0x00000000, 0x40000000, 0xC8000000}));
         home.addView(shade, new FrameLayout.LayoutParams(-1, -1));
+        // Darkens bright (daytime) wallpapers so the glass and text always stand out.
+        dimView = new View(this);
+        dimView.setBackgroundColor(Color.BLACK);
+        dimView.setAlpha(0f);
+        home.addView(dimView, new FrameLayout.LayoutParams(-1, -1));
 
         FrameLayout content = new FrameLayout(this);
         content.setClipChildren(false);
@@ -353,7 +359,7 @@ public class MainActivity extends Activity {
         dateRow.addView(weatherText);
         weatherIcon.setVisibility(View.GONE);
         weatherText.setVisibility(View.GONE);
-        center.addView(dateRow);
+        center.addView(dateRow, new LinearLayout.LayoutParams(-2, -2));
 
         clock = new ClockView(this);
         clock.setTypeface(clockTypeface());
@@ -468,8 +474,8 @@ public class MainActivity extends Activity {
             t.setClickable(true);
             GradientDrawable bg = new GradientDrawable();
             bg.setCornerRadius(dp(14));
-            bg.setColor(on ? 0xF2FFFFFF : 0x2EFFFFFF);
-            if (!on) bg.setStroke(dp(1), 0x40FFFFFF);
+            bg.setColor(on ? 0xF2FFFFFF : 0x80101419);
+            if (!on) bg.setStroke(dp(1), 0x33FFFFFF);
             t.setBackground(bg);
             final GradientDrawable ring = new GradientDrawable();
             ring.setCornerRadius(dp(14));
@@ -534,7 +540,7 @@ public class MainActivity extends Activity {
         FrameLayout f = new FrameLayout(this);
         f.setFocusable(true);
         f.setClickable(true);
-        f.setBackground(glass(14, 0x2EFFFFFF));
+        f.setBackground(glass(14, 0x99101419));
         ImageView iv = new ImageView(this);
         iv.setImageDrawable(icon);
         iv.setPadding(dp(17), dp(17), dp(17), dp(17));
@@ -564,7 +570,7 @@ public class MainActivity extends Activity {
         f.setFocusable(true);
         f.setClickable(true);
         final int radius = dp(14);
-        f.setBackground(glass(14, 0x2EFFFFFF));
+        f.setBackground(glass(14, 0x99101419));
         f.setOutlineProvider(new ViewOutlineProvider() {
             @Override
             public void getOutline(View v, Outline o) {
@@ -586,8 +592,7 @@ public class MainActivity extends Activity {
             iv.setScaleY(1.45f);
         } else {
             iv.setImageDrawable(ic);
-            iv.setScaleType(ImageView.ScaleType.FIT_CENTER);
-            iv.setPadding(dp(6), dp(6), dp(6), dp(6));
+            iv.setScaleType(ImageView.ScaleType.CENTER_CROP);
         }
         f.addView(iv, new FrameLayout.LayoutParams(-1, -1));
         final GradientDrawable ring = new GradientDrawable();
@@ -699,7 +704,7 @@ public class MainActivity extends Activity {
     // ---------------------------------------------------------------- clock
 
     int clockAlpha() {
-        return prefs.getInt("clockAlpha", 60);
+        return prefs.getInt("clockAlpha", 88);
     }
 
     void paintClock() {
@@ -872,6 +877,21 @@ public class MainActivity extends Activity {
     }
 
     /** Most colourful bright colour in the wallpaper, used to tint the see-through clock. */
+    /** How much to darken a wallpaper: 0 for night pictures, up to 0.4 for bright daylight. */
+    static float dimFor(Bitmap src) {
+        if (src == null) return 0f;
+        Bitmap s = Bitmap.createScaledBitmap(src, 32, 18, true);
+        double sum = 0;
+        for (int y = 0; y < 18; y++) {
+            for (int x = 0; x < 32; x++) {
+                int c = s.getPixel(x, y);
+                sum += (0.2126 * Color.red(c) + 0.7152 * Color.green(c) + 0.0722 * Color.blue(c)) / 255.0;
+            }
+        }
+        double lum = sum / (32 * 18);
+        return (float) Math.max(0, Math.min(0.4, (lum - 0.22) * 1.1));
+    }
+
     static int pickTint(Bitmap src) {
         if (src == null) return 0xFFB8D8E8;
         Bitmap s = Bitmap.createScaledBitmap(src, 48, 27, true);
@@ -946,9 +966,11 @@ public class MainActivity extends Activity {
             if (Build.VERSION.SDK_INT >= 24) b.prepareToDraw();
             Bitmap glass = ClockView.makeGlass(b);
             int t = pickTint(b);
+            float dim = dimFor(b);
             handler.post(() -> {
                 if (token != wpToken || isDestroyed()) return;
                 setWallpaperBitmap(b, glass, t, animate);
+                dimView.animate().alpha(dim).setDuration(animate ? 2600 : 0).start();
             });
         });
     }
@@ -1796,13 +1818,10 @@ public class MainActivity extends Activity {
             addWatchCard(pkg, appName(pkg).toUpperCase(Locale.ROOT), title, art, i++);
             shown.add(pkg);
         }
-        // Not enough history yet: fill with your apps so the row always looks complete.
-        for (String pkg : getDock()) {
-            if (shown.size() >= 3) break;
-            if (shown.contains(pkg) || !installed(pkg)) continue;
-            addWatchCard(pkg, "OPEN APP", appName(pkg), null, i++);
-            shown.add(pkg);
-        }
+        // Only real titles: with nothing to show, the row hides instead of repeating the apps.
+        int vis = shown.isEmpty() ? View.GONE : View.VISIBLE;
+        watchRow.setVisibility(vis);
+        watchTitle.setVisibility(vis);
     }
 
     void addWatchCard(String pkg, String label, String title, Bitmap art, int index) {
@@ -1814,8 +1833,8 @@ public class MainActivity extends Activity {
         card.setPadding(dp(8), dp(7), dp(14), dp(7));
         GradientDrawable bg = new GradientDrawable();
         bg.setCornerRadius(dp(14));
-        bg.setColor(0x52101419);
-        bg.setStroke(dp(1), 0x2EFFFFFF);
+        bg.setColor(0xA6101419);
+        bg.setStroke(dp(1), 0x33FFFFFF);
         card.setBackground(bg);
 
         // thumbnail
@@ -1871,7 +1890,7 @@ public class MainActivity extends Activity {
             v.animate().scaleX(has ? 1.05f : 1f).scaleY(has ? 1.05f : 1f).setDuration(200)
                     .setInterpolator(new OvershootInterpolator(1.2f)).start();
             card.setForeground(has ? ring : null);
-            bg.setColor(has ? 0x80202833 : 0x52101419);
+            bg.setColor(has ? 0xCC232B36 : 0xA6101419);
         });
         card.setOnClickListener(v -> press(v, () -> launch(pkg, v)));
 
