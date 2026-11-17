@@ -1,7 +1,9 @@
 package se.william.hem;
 
 import android.accessibilityservice.AccessibilityService;
+import android.app.SearchManager;
 import android.content.ComponentName;
+import android.net.Uri;
 import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.content.pm.ResolveInfo;
@@ -37,6 +39,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
@@ -149,6 +152,15 @@ public class HomeKeyService extends AccessibilityService {
             if (path.equals("/icon")) {
                 byte[] png = icon(q.get("p"));
                 return png == null ? null : RemoteServer.Response.of("image/png", png);
+            }
+            if (path.equals("/ask")) {
+                String text = new String(body, StandardCharsets.UTF_8);
+                final String[] msg = {""};
+                runOnMain(() -> {
+                    msg[0] = ask(text);
+                    return true;
+                });
+                return RemoteServer.Response.json("{\"msg\":\"" + esc(msg[0]) + "\"}");
             }
             if (path.equals("/now")) {
                 return RemoteServer.Response.json(nowPlaying());
@@ -340,6 +352,101 @@ public class HomeKeyService extends AccessibilityService {
             // listener not allowed yet
         }
         return "{}";
+    }
+
+    // ================================================================ "ask": free command bar, no AI service
+
+    private static final String[] VERBS = {
+            "kan du ", "jag vill se ", "jag vill kolla på ", "sätt på ", "titta på ", "kolla på ",
+            "starta ", "öppna ", "spela ", "kör ", "visa ", "sök efter ", "sök på ", "sök ",
+            "please ", "put on ", "watch ", "play ", "open ", "start ", "launch ", "search for ", "search "};
+
+    /**
+     * Understands simple sentences like "starta spiderman", "spela f1 på youtube", "öppna netflix".
+     * A title goes to Google TV's own search, which knows which of your subscriptions has it.
+     */
+    private String ask(String raw) {
+        String q = raw.trim().toLowerCase(Locale.ROOT).replaceAll("[.!?]+$", "").trim();
+        boolean again = true;
+        while (again) {
+            again = false;
+            for (String v : VERBS) {
+                if (q.startsWith(v)) {
+                    q = q.substring(v.length()).trim();
+                    again = true;
+                }
+            }
+        }
+        if (q.isEmpty()) return "Say what you want to watch, like “start Spider-Man”.";
+
+        // "... på netflix" / "... on youtube"
+        String targetPkg = null, targetName = null;
+        for (String sep : new String[]{" på ", " on ", " i ", " in "}) {
+            int i = q.lastIndexOf(sep);
+            if (i > 0) {
+                String[] app = findApp(q.substring(i + sep.length()).trim());
+                if (app != null) {
+                    targetPkg = app[0];
+                    targetName = app[1];
+                    q = q.substring(0, i).trim();
+                    break;
+                }
+            }
+        }
+
+        // Just an app name: open it.
+        if (targetPkg == null) {
+            String[] app = findApp(q);
+            if (app != null) {
+                return launch(app[0]) ? "Opening " + app[1] + "." : "Couldn’t open " + app[1] + ".";
+            }
+        }
+
+        String title = q;
+        if (targetPkg != null && targetPkg.equals("com.google.android.youtube.tv")) {
+            Intent yt = new Intent(Intent.ACTION_VIEW,
+                    Uri.parse("https://www.youtube.com/results?search_query=" + Uri.encode(title)));
+            yt.setPackage(targetPkg);
+            if (start(yt)) return "Searching YouTube for “" + title + "”.";
+        }
+        if (targetPkg != null && targetPkg.equals("com.netflix.ninja")) {
+            Intent nf = new Intent(Intent.ACTION_VIEW,
+                    Uri.parse("https://www.netflix.com/search?q=" + Uri.encode(title)));
+            nf.setPackage(targetPkg);
+            if (start(nf)) return "Searching Netflix for “" + title + "”.";
+        }
+
+        // Google TV's search finds the title across your services and offers "Watch on …".
+        Intent gs = new Intent("android.search.action.GLOBAL_SEARCH");
+        gs.putExtra(SearchManager.QUERY, title);
+        if (start(gs)) {
+            return "Looking for “" + title + "” on your TV"
+                    + (targetName != null ? " (pick " + targetName + " in the results)." : ".");
+        }
+        Intent s2 = new Intent(Intent.ACTION_SEARCH);
+        s2.putExtra(SearchManager.QUERY, title);
+        s2.setPackage("com.google.android.katniss");
+        if (start(s2)) return "Looking for “" + title + "” on your TV.";
+        if (targetPkg != null && launch(targetPkg)) return "Opened " + targetName + ". Search for “" + title + "” there.";
+        return "Couldn’t start a search on the TV.";
+    }
+
+    /** Finds an installed TV app by (part of) its name, e.g. "f1", "svt", "yt". Returns {package, label}. */
+    private String[] findApp(String name) {
+        String n = name.toLowerCase(Locale.ROOT).replace(" ", "");
+        if (n.isEmpty()) return null;
+        if (n.equals("yt")) n = "youtube";
+        if (n.equals("f1") || n.equals("formel1") || n.equals("formula1")) n = "f1tv";
+        PackageManager pm = getPackageManager();
+        Intent i = new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LEANBACK_LAUNCHER);
+        String[] best = null;
+        for (ResolveInfo r : pm.queryIntentActivities(i, 0)) {
+            String label = String.valueOf(r.loadLabel(pm));
+            String l = label.toLowerCase(Locale.ROOT).replace(" ", "");
+            if (l.equals(n)) return new String[]{r.activityInfo.packageName, label};
+            if (best == null && n.length() >= 3 && l.startsWith(n)) best = new String[]{r.activityInfo.packageName, label};
+        }
+        return best;
     }
 
     // ================================================================ pairing code on the TV

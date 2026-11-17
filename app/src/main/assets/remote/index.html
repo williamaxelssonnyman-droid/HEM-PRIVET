@@ -154,11 +154,12 @@
 
   /* ---------- phone held upright ---------- */
   @media (orientation: portrait) {
-    .app { grid-template-columns: 1fr; grid-template-rows: auto auto minmax(240px, 1fr) auto auto;
-      grid-template-areas: "top" "now" "pad" "controls" "type"; }
+    .app { grid-template-columns: 1fr; grid-template-rows: auto auto auto minmax(220px, 1fr) auto auto;
+      grid-template-areas: "top" "now" "ask" "pad" "controls" "type"; }
     .side { display: contents; }
     .now-wrap { grid-area: now; }
     .type { grid-area: type; }
+    .ask { grid-area: ask; }
     .apps-wrap { display: none; grid-area: pad; }
     .app.show-apps .apps-wrap { display: block; }
     .app.show-apps .pad { display: none; }
@@ -213,6 +214,11 @@
         <button class="pp" data-key="playpause" aria-label="Play or pause"><svg viewBox="0 0 24 24" fill="currentColor" id="ppIcon"><path d="M7 5l12 7-12 7z"/></svg></button>
       </div>
     </div>
+    <form class="type ask glass" id="askForm" autocomplete="off">
+      <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="color:var(--dim);flex:none"><path d="M12 3l1.8 4.6L18 9l-4.2 1.4L12 15l-1.8-4.6L6 9l4.2-1.4z"/><path d="M19 15l.8 2 2 .8-2 .8-.8 2-.8-2-2-.8 2-.8z"/></svg>
+      <input id="askInput" placeholder="Ask: “start Spider-Man 2”, “F1 on YouTube”…" enterkeyhint="go" autocorrect="on">
+      <button class="send" aria-label="Go"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M13 6l6 6-6 6"/></svg></button>
+    </form>
     <div class="apps-wrap">
       <div class="label">Apps</div>
       <div class="apps" id="apps"></div>
@@ -392,6 +398,16 @@
   $('typeForm').addEventListener('submit', (e) => {
     e.preventDefault(); clearTimeout(typeTimer);
     sendText(true).then(() => { input.value = ''; input.blur(); });
+  });
+
+  // ---------- ask ----------
+  $('askForm').addEventListener('submit', (e) => {
+    e.preventDefault();
+    const q = $('askInput').value.trim(); if (!q) return;
+    $('askInput').blur();
+    call('/ask', { body: q, headers: { 'Content-Type': 'text/plain' } })
+      .then((r) => { toast(r.msg || 'Done'); $('askInput').value = ''; })
+      .catch(() => toast('Can\u2019t reach the TV'));
   });
 
   // ---------- pairing ----------
