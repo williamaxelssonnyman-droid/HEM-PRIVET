@@ -23,6 +23,10 @@ jobs:
         run: |
           pip install --quiet pillow
           python3 tools/prepare_images.py
+      - name: Clock font (Oswald, SIL Open Font License)
+        run: |
+          mkdir -p app/src/main/assets/fonts
+          curl -fsSL -o app/src/main/assets/fonts/clock.ttf "https://github.com/google/fonts/raw/main/ofl/oswald/Oswald%5Bwght%5D.ttf" && ls -la app/src/main/assets/fonts || echo "::warning::font download failed, using system font"
       - name: Bygg APK
         run: gradle assembleDebug --no-daemon --stacktrace
       - name: Döp om

@@ -1,10 +1,12 @@
 package se.william.hem;
 
+import android.animation.Animator;
+import android.animation.AnimatorListenerAdapter;
 import android.animation.ArgbEvaluator;
 import android.animation.ObjectAnimator;
 import android.animation.ValueAnimator;
 import android.app.Activity;
-import android.app.AlertDialog;
+import android.app.ActivityOptions;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.pm.ApplicationInfo;
@@ -30,6 +32,7 @@ import android.graphics.Typeface;
 import android.graphics.drawable.ColorDrawable;
 import android.graphics.drawable.Drawable;
 import android.graphics.drawable.GradientDrawable;
+import android.graphics.drawable.StateListDrawable;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
@@ -39,12 +42,15 @@ import android.text.TextWatcher;
 import android.util.TypedValue;
 import android.view.Gravity;
 import android.view.View;
+import android.view.ViewAnimationUtils;
 import android.view.ViewOutlineProvider;
 import android.view.animation.AccelerateDecelerateInterpolator;
+import android.view.animation.AccelerateInterpolator;
 import android.view.animation.DecelerateInterpolator;
 import android.view.animation.OvershootInterpolator;
 import android.widget.FrameLayout;
 import android.widget.GridLayout;
+import android.widget.HorizontalScrollView;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
@@ -79,6 +85,16 @@ public class MainActivity extends Activity {
     };
     static final int[] ROTATE_MIN = {0, 1, 5, 10, 30, 60};
 
+    static class Item {
+        final String text;
+        final Runnable action;
+
+        Item(String text, Runnable action) {
+            this.text = text;
+            this.action = action;
+        }
+    }
+
     SharedPreferences prefs;
     PackageManager pm;
     float density;
@@ -89,16 +105,19 @@ public class MainActivity extends Activity {
     ImageView bgA, bgB;
     boolean aOnTop = true;
     int wpIndex = -1;
-    LinearLayout dock;
-    TextView label;
+    LinearLayout appsRow;
+    TextView appsTitle;
     TextClock clock;
     TextClock date;
     View clockBox;
+    View gridBtn, gearBtn;
     FrameLayout overlay;
+    FrameLayout panel;
     ObjectAnimator pan;
     String focusPkg;
     int tint = 0xFFB8D8E8;
     String lastTime = "";
+    boolean animateIn = true;
 
     final Runnable rotateTask = new Runnable() {
         @Override
@@ -126,9 +145,11 @@ public class MainActivity extends Activity {
         super.onResume();
         applyWallpaper();
         applyClock();
-        refreshDock();
+        animateIn = true;
+        refreshApps();
         startPan();
         scheduleRotate();
+        introAnimation();
     }
 
     @Override
@@ -141,7 +162,8 @@ public class MainActivity extends Activity {
     @Override
     protected void onNewIntent(Intent intent) {
         super.onNewIntent(intent);
-        closeOverlay();
+        closePanel(false);
+        closeOverlay(false);
         focusPkg = null;
         focusFirst();
     }
@@ -149,7 +171,8 @@ public class MainActivity extends Activity {
     @Override
     public void onBackPressed() {
         // Never move the task to the back: that crashed the system on this device.
-        if (overlay != null) closeOverlay();
+        if (panel != null) closePanel(true);
+        else if (overlay != null) closeOverlay(true);
     }
 
     int dp(float v) {
@@ -157,6 +180,24 @@ public class MainActivity extends Activity {
     }
 
     // ---------------------------------------------------------------- UI
+
+    Typeface clockTypeface() {
+        try {
+            Typeface t = new Typeface.Builder(getAssets(), "fonts/clock.ttf")
+                    .setFontVariationSettings("'wght' 300").build();
+            if (t != null) return t;
+        } catch (Throwable ignored) {
+        }
+        return Typeface.create("sans-serif-condensed-light", Typeface.NORMAL);
+    }
+
+    GradientDrawable glass(float radiusDp, int fill) {
+        GradientDrawable g = new GradientDrawable();
+        g.setCornerRadius(dp(radiusDp));
+        g.setColor(fill);
+        g.setStroke(dp(1), 0x55FFFFFF);
+        return g;
+    }
 
     void buildUi() {
         root = new FrameLayout(this);
@@ -175,7 +216,7 @@ public class MainActivity extends Activity {
 
         View shade = new View(this);
         shade.setBackground(new GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM,
-                new int[]{0x44000000, 0x00000000, 0x22000000, 0xAA000000}));
+                new int[]{0x40000000, 0x00000000, 0x10000000, 0xB0000000}));
         root.addView(shade, new FrameLayout.LayoutParams(-1, -1));
 
         FrameLayout content = new FrameLayout(this);
@@ -185,6 +226,16 @@ public class MainActivity extends Activity {
         content.setPadding(dp(48), dp(27), dp(48), dp(27));
         root.addView(content, new FrameLayout.LayoutParams(-1, -1));
 
+        // Top right: round glass buttons.
+        LinearLayout topRight = new LinearLayout(this);
+        topRight.setOrientation(LinearLayout.HORIZONTAL);
+        gridBtn = roundButton(new DotsDrawable(), "All apps", () -> showAllApps(gridBtn));
+        gearBtn = roundButton(new GearDrawable(), "Settings", () -> showSettings(gearBtn));
+        topRight.addView(gridBtn);
+        topRight.addView(gearBtn);
+        content.addView(topRight, new FrameLayout.LayoutParams(-2, -2, Gravity.TOP | Gravity.END));
+
+        // Centre: date + big see-through clock.
         LinearLayout center = new LinearLayout(this);
         center.setOrientation(LinearLayout.VERTICAL);
         center.setGravity(Gravity.CENTER_HORIZONTAL);
@@ -192,18 +243,17 @@ public class MainActivity extends Activity {
         date = new TextClock(this);
         date.setFormat12Hour("EEEE d MMMM");
         date.setFormat24Hour("EEEE d MMMM");
-        date.setTextColor(0xE6FFFFFF);
-        date.setTextSize(TypedValue.COMPLEX_UNIT_SP, 20);
+        date.setTextColor(0xD9FFFFFF);
+        date.setTextSize(TypedValue.COMPLEX_UNIT_SP, 19);
         date.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
-        date.setShadowLayer(10, 0, 2, 0x99000000);
+        date.setShadowLayer(10, 0, 2, 0x88000000);
         center.addView(date);
 
         clock = new TextClock(this);
-        clock.setTextSize(TypedValue.COMPLEX_UNIT_SP, 210);
-        clock.setTypeface(Typeface.create("sans-serif-condensed", Typeface.NORMAL));
+        clock.setTextSize(TypedValue.COMPLEX_UNIT_SP, 230);
+        clock.setTypeface(clockTypeface());
         clock.setIncludeFontPadding(false);
-        clock.setLetterSpacing(-0.03f);
-        clock.setShadowLayer(40, 0, 0, 0x33FFFFFF);
+        clock.setLetterSpacing(0.01f);
         clock.addOnLayoutChangeListener((v, l, t, r, btm, ol, ot, orr, ob) -> paintClock());
         clock.addTextChangedListener(new TextWatcher() {
             @Override public void beforeTextChanged(CharSequence s, int a, int b, int c) { }
@@ -216,77 +266,152 @@ public class MainActivity extends Activity {
             }
         });
         LinearLayout.LayoutParams clockLp = new LinearLayout.LayoutParams(-2, -2);
-        clockLp.topMargin = -dp(14);
+        clockLp.topMargin = -dp(6);
         center.addView(clock, clockLp);
 
         clockBox = center;
         FrameLayout.LayoutParams clp = new FrameLayout.LayoutParams(-2, -2, Gravity.CENTER_HORIZONTAL | Gravity.TOP);
-        clp.topMargin = dp(30);
+        clp.topMargin = dp(8);
         content.addView(center, clp);
 
-        dock = new LinearLayout(this);
-        dock.setOrientation(LinearLayout.HORIZONTAL);
-        dock.setGravity(Gravity.CENTER_VERTICAL);
-        dock.setPadding(dp(8), dp(8), dp(8), dp(8));
-        dock.setClipChildren(false);
-        dock.setClipToPadding(false);
-        GradientDrawable glass = new GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM,
-                new int[]{0x55FFFFFF, 0x22FFFFFF, 0x33FFFFFF});
-        glass.setCornerRadius(dp(26));
-        glass.setStroke(dp(2), 0xAAFFFFFF);
-        dock.setBackground(glass);
-        FrameLayout.LayoutParams dlp = new FrameLayout.LayoutParams(-2, -2, Gravity.CENTER_HORIZONTAL | Gravity.BOTTOM);
-        dlp.bottomMargin = dp(46);
-        content.addView(dock, dlp);
+        // Bottom left: "Apps" title + row of app cards.
+        LinearLayout bottom = new LinearLayout(this);
+        bottom.setOrientation(LinearLayout.VERTICAL);
+        bottom.setClipChildren(false);
+        bottom.setClipToPadding(false);
 
-        label = new TextView(this);
-        label.setTextColor(Color.WHITE);
-        label.setTextSize(TypedValue.COMPLEX_UNIT_SP, 16);
-        label.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
-        label.setShadowLayer(10, 0, 2, 0xCC000000);
-        FrameLayout.LayoutParams llp = new FrameLayout.LayoutParams(-2, -2, Gravity.CENTER_HORIZONTAL | Gravity.BOTTOM);
-        llp.bottomMargin = dp(12);
-        content.addView(label, llp);
+        appsTitle = new TextView(this);
+        appsTitle.setText("Your apps");
+        appsTitle.setTextColor(0xEEFFFFFF);
+        appsTitle.setTextSize(TypedValue.COMPLEX_UNIT_SP, 17);
+        appsTitle.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        appsTitle.setShadowLayer(8, 0, 2, 0xAA000000);
+        appsTitle.setPadding(dp(6), 0, 0, dp(6));
+        bottom.addView(appsTitle);
+
+        HorizontalScrollView hs = new HorizontalScrollView(this);
+        hs.setHorizontalScrollBarEnabled(false);
+        hs.setClipChildren(false);
+        hs.setClipToPadding(false);
+        hs.setPadding(0, dp(8), 0, dp(10));
+        appsRow = new LinearLayout(this);
+        appsRow.setOrientation(LinearLayout.HORIZONTAL);
+        appsRow.setClipChildren(false);
+        appsRow.setClipToPadding(false);
+        hs.addView(appsRow);
+        bottom.addView(hs);
+
+        content.addView(bottom, new FrameLayout.LayoutParams(-1, -2, Gravity.BOTTOM | Gravity.START));
 
         setContentView(root);
+    }
+
+    View roundButton(Drawable icon, String name, Runnable click) {
+        FrameLayout f = new FrameLayout(this);
+        f.setFocusable(true);
+        f.setClickable(true);
+        StateListDrawable sl = new StateListDrawable();
+        GradientDrawable on = new GradientDrawable();
+        on.setShape(GradientDrawable.OVAL);
+        on.setColor(0xEEFFFFFF);
+        GradientDrawable off = new GradientDrawable();
+        off.setShape(GradientDrawable.OVAL);
+        off.setColor(0x33FFFFFF);
+        off.setStroke(dp(1), 0x55FFFFFF);
+        sl.addState(new int[]{android.R.attr.state_focused}, on);
+        sl.addState(new int[]{}, off);
+        f.setBackground(sl);
+        ImageView iv = new ImageView(this);
+        iv.setImageDrawable(icon);
+        iv.setPadding(dp(12), dp(12), dp(12), dp(12));
+        f.addView(iv, new FrameLayout.LayoutParams(-1, -1));
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(dp(48), dp(48));
+        lp.setMargins(dp(6), 0, 0, 0);
+        f.setLayoutParams(lp);
+        f.setContentDescription(name);
+        f.setOnFocusChangeListener((v, has) -> {
+            v.animate().scaleX(has ? 1.15f : 1f).scaleY(has ? 1.15f : 1f).setDuration(160).start();
+            iv.setColorFilter(has ? 0xFF101418 : Color.WHITE);
+        });
+        iv.setColorFilter(Color.WHITE);
+        f.setOnClickListener(v -> press(v, click));
+        return f;
+    }
+
+    // ---------------------------------------------------------------- animation helpers
+
+    /** Quick "press" squish, then run the action. */
+    void press(View v, Runnable then) {
+        v.animate().scaleX(0.9f).scaleY(0.9f).setDuration(90).setInterpolator(new AccelerateInterpolator())
+                .withEndAction(() -> {
+                    v.animate().scaleX(1.08f).scaleY(1.08f).setDuration(160)
+                            .setInterpolator(new OvershootInterpolator(2f)).start();
+                    then.run();
+                }).start();
+    }
+
+    int[] centerIn(View anchor, View target) {
+        int[] a = new int[2];
+        int[] t = new int[2];
+        anchor.getLocationOnScreen(a);
+        target.getLocationOnScreen(t);
+        return new int[]{a[0] + anchor.getWidth() / 2 - t[0], a[1] + anchor.getHeight() / 2 - t[1]};
+    }
+
+    void reveal(View target, View anchor, boolean open, Runnable end) {
+        target.post(() -> {
+            if (!target.isAttachedToWindow()) return;
+            int[] c = anchor != null && anchor.isAttachedToWindow()
+                    ? centerIn(anchor, target) : new int[]{target.getWidth() / 2, target.getHeight() / 2};
+            float far = (float) Math.hypot(Math.max(c[0], target.getWidth() - c[0]),
+                    Math.max(c[1], target.getHeight() - c[1]));
+            Animator a = ViewAnimationUtils.createCircularReveal(target, c[0], c[1], open ? 0 : far, open ? far : 0);
+            a.setDuration(open ? 480 : 320);
+            a.setInterpolator(open ? new DecelerateInterpolator(1.6f) : new AccelerateInterpolator());
+            a.addListener(new AnimatorListenerAdapter() {
+                @Override
+                public void onAnimationEnd(Animator animation) {
+                    if (end != null) end.run();
+                }
+            });
+            target.setVisibility(View.VISIBLE);
+            a.start();
+        });
+    }
+
+    void introAnimation() {
+        clockBox.setAlpha(0f);
+        clockBox.setScaleX(0.92f);
+        clockBox.setScaleY(0.92f);
+        clockBox.animate().alpha(1f).scaleX(1f).scaleY(1f).setDuration(1100)
+                .setInterpolator(new DecelerateInterpolator(2f)).start();
+        appsTitle.setAlpha(0f);
+        appsTitle.animate().alpha(1f).setStartDelay(200).setDuration(600).start();
+    }
+
+    void tickAnimation() {
+        clock.setTranslationY(dp(28));
+        clock.setAlpha(0f);
+        clock.animate().translationY(0).alpha(1f).setDuration(900)
+                .setInterpolator(new OvershootInterpolator(0.9f)).start();
     }
 
     // ---------------------------------------------------------------- clock
 
     int clockAlpha() {
-        return prefs.getInt("clockAlpha", 75);
+        return prefs.getInt("clockAlpha", 60);
     }
 
     void paintClock() {
         int h = clock.getHeight();
         if (h <= 0) return;
         int a = Math.round(255 * clockAlpha() / 100f);
-        int top = withAlpha(mix(tint, Color.WHITE, 0.65f), Math.min(255, a + 30));
-        int mid = withAlpha(mix(tint, Color.WHITE, 0.35f), a);
-        int bottom = withAlpha(tint, Math.max(40, a - 70));
+        int top = withAlpha(mix(tint, Color.WHITE, 0.55f), Math.min(255, a + 25));
+        int mid = withAlpha(tint, a);
+        int bottom = withAlpha(mix(tint, Color.WHITE, 0.25f), Math.max(25, a - 90));
         clock.getPaint().setShader(new LinearGradient(0, 0, 0, h,
-                new int[]{top, mid, bottom}, new float[]{0f, 0.5f, 1f}, Shader.TileMode.CLAMP));
+                new int[]{top, mid, bottom}, new float[]{0f, 0.55f, 1f}, Shader.TileMode.CLAMP));
         clock.invalidate();
-    }
-
-    void tickAnimation() {
-        clock.setTranslationY(dp(24));
-        clock.setAlpha(0f);
-        clock.setScaleX(0.96f);
-        clock.setScaleY(0.96f);
-        clock.animate().translationY(0).alpha(1f).scaleX(1f).scaleY(1f)
-                .setDuration(900).setInterpolator(new OvershootInterpolator(0.8f)).start();
-    }
-
-    void introAnimation() {
-        clockBox.setAlpha(0f);
-        clockBox.setTranslationY(-dp(20));
-        clockBox.animate().alpha(1f).translationY(0).setDuration(1200)
-                .setInterpolator(new DecelerateInterpolator()).start();
-        dock.setAlpha(0f);
-        dock.setTranslationY(dp(30));
-        dock.animate().alpha(1f).translationY(0).setStartDelay(250).setDuration(900)
-                .setInterpolator(new DecelerateInterpolator()).start();
     }
 
     void applyClock() {
@@ -294,7 +419,7 @@ public class MainActivity extends Activity {
         String f = h24 ? "HH:mm" : "h:mm";
         clock.setFormat24Hour(f);
         clock.setFormat12Hour(f);
-        clockBox.setVisibility(prefs.getBoolean("clock", true) ? View.VISIBLE : View.GONE);
+        clockBox.setVisibility(prefs.getBoolean("clock", true) ? View.VISIBLE : View.INVISIBLE);
         paintClock();
     }
 
@@ -335,8 +460,8 @@ public class MainActivity extends Activity {
         }
         if (best < 0.15f) bestC = Color.rgb((int) (r / n), (int) (g / n), (int) (b / n));
         Color.colorToHSV(bestC, hsv);
-        hsv[1] = Math.min(0.75f, hsv[1]);
-        hsv[2] = Math.max(0.85f, hsv[2]);
+        hsv[1] = Math.min(0.7f, hsv[1]);
+        hsv[2] = Math.max(0.9f, hsv[2]);
         return Color.HSVToColor(hsv);
     }
 
@@ -367,8 +492,7 @@ public class MainActivity extends Activity {
 
     void showWallpaper(int idx, boolean animate) {
         wpIndex = idx;
-        Bitmap b = decodeRes(WALLPAPERS[idx]);
-        setWallpaperBitmap(b, animate);
+        setWallpaperBitmap(decodeRes(WALLPAPERS[idx]), animate);
     }
 
     void setWallpaperBitmap(Bitmap b, boolean animate) {
@@ -381,16 +505,18 @@ public class MainActivity extends Activity {
             back.setAlpha(0f);
             tint = newTint;
             paintClock();
-            introAnimation();
             return;
         }
         back.setImageBitmap(b);
         back.bringToFront();
         back.setAlpha(0f);
-        back.animate().alpha(1f).setDuration(2500).withEndAction(() -> front.setAlpha(0f)).start();
+        back.setScaleX(1.06f);
+        back.setScaleY(1.06f);
+        back.animate().alpha(1f).scaleX(1f).scaleY(1f).setDuration(2600)
+                .withEndAction(() -> front.setAlpha(0f)).start();
         aOnTop = !aOnTop;
         ValueAnimator va = ValueAnimator.ofObject(new ArgbEvaluator(), tint, newTint);
-        va.setDuration(2500);
+        va.setDuration(2600);
         va.addUpdateListener(an -> {
             tint = (int) an.getAnimatedValue();
             paintClock();
@@ -436,16 +562,14 @@ public class MainActivity extends Activity {
         pan.start();
     }
 
-    // ---------------------------------------------------------------- tiles & dock
+    // ---------------------------------------------------------------- app cards
 
-    View tile(Drawable d, boolean banner, String name, int widthDp, Runnable click, Runnable longClick, String pkg) {
+    View appCard(String pkg, int widthDp, int heightDp, Runnable longClick) {
         final FrameLayout f = new FrameLayout(this);
         f.setFocusable(true);
         f.setClickable(true);
-        final int radius = dp(16);
-        GradientDrawable base = new GradientDrawable();
-        base.setCornerRadius(radius);
-        base.setColor(banner ? 0xFF202020 : 0x40FFFFFF);
+        final int radius = dp(14);
+        GradientDrawable base = glass(14, 0x33FFFFFF);
         f.setBackground(base);
         f.setOutlineProvider(new ViewOutlineProvider() {
             @Override
@@ -455,38 +579,44 @@ public class MainActivity extends Activity {
         });
         f.setClipToOutline(true);
 
+        Drawable ban = banner(pkg);
         ImageView iv = new ImageView(this);
-        iv.setImageDrawable(d);
-        iv.setScaleType(banner ? ImageView.ScaleType.CENTER_CROP : ImageView.ScaleType.FIT_CENTER);
-        int pad = banner ? 0 : dp(20);
-        iv.setPadding(pad, pad, pad, pad);
+        iv.setImageDrawable(ban != null ? ban : icon(pkg));
+        iv.setScaleType(ban != null ? ImageView.ScaleType.CENTER_CROP : ImageView.ScaleType.FIT_CENTER);
+        if (ban == null) iv.setPadding(dp(18), dp(18), dp(18), dp(18));
         f.addView(iv, new FrameLayout.LayoutParams(-1, -1));
+
+        // Soft shine on top of the card, like glass.
+        View shine = new View(this);
+        shine.setBackground(new GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM,
+                new int[]{0x30FFFFFF, 0x00FFFFFF}));
+        f.addView(shine, new FrameLayout.LayoutParams(-1, dp(heightDp) / 2));
 
         final GradientDrawable ring = new GradientDrawable();
         ring.setCornerRadius(radius);
         ring.setColor(Color.TRANSPARENT);
         ring.setStroke(dp(3), Color.WHITE);
 
-        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(dp(widthDp), dp(84));
-        lp.setMargins(dp(5), dp(4), dp(5), dp(4));
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(dp(widthDp), dp(heightDp));
+        lp.setMargins(dp(6), dp(4), dp(6), dp(4));
         f.setLayoutParams(lp);
 
+        final String name = appName(pkg);
         f.setOnFocusChangeListener((v, has) -> {
-            v.animate().scaleX(has ? 1.08f : 1f).scaleY(has ? 1.08f : 1f).setDuration(140).start();
-            v.setElevation(has ? dp(10) : 0);
+            v.animate().scaleX(has ? 1.1f : 1f).scaleY(has ? 1.1f : 1f).translationY(has ? -dp(6) : 0)
+                    .setDuration(220).setInterpolator(new OvershootInterpolator(1.4f)).start();
+            v.setElevation(has ? dp(14) : 0);
             f.setForeground(has ? ring : null);
             if (has) {
-                label.setText(name);
+                appsTitle.setText(name);
                 focusPkg = pkg;
             }
         });
-        f.setOnClickListener(v -> click.run());
-        if (longClick != null) {
-            f.setOnLongClickListener(v -> {
-                longClick.run();
-                return true;
-            });
-        }
+        f.setOnClickListener(v -> press(v, () -> launch(pkg, v)));
+        f.setOnLongClickListener(v -> {
+            longClick.run();
+            return true;
+        });
         return f;
     }
 
@@ -506,69 +636,77 @@ public class MainActivity extends Activity {
         prefs.edit().putString("dock", String.join(",", l)).apply();
     }
 
-    void refreshDock() {
+    void refreshApps() {
         String keep = focusPkg;
-        dock.removeAllViews();
+        appsRow.removeAllViews();
         View focusTarget = null;
+        int i = 0;
         for (String p : getDock()) {
             if (!installed(p)) continue;
             final String pkg = p;
-            Drawable ban = banner(pkg);
-            View t = tile(ban != null ? ban : icon(pkg), ban != null, appName(pkg), 150,
-                    () -> launch(pkg), () -> appMenu(pkg), pkg);
-            dock.addView(t);
+            final View[] holder = new View[1];
+            View t = appCard(pkg, 176, 99, () -> appMenu(pkg, holder[0]));
+            holder[0] = t;
+            appsRow.addView(t);
             if (pkg.equals(keep)) focusTarget = t;
+            if (animateIn) {
+                t.setAlpha(0f);
+                t.setTranslationY(dp(40));
+                t.animate().alpha(1f).translationY(0).setStartDelay(150 + i * 70L).setDuration(520)
+                        .setInterpolator(new DecelerateInterpolator(2f)).start();
+            }
+            i++;
         }
-        View grid = tile(new DotsDrawable(), false, "All apps", 84, this::showAllApps, null, "#grid");
-        dock.addView(grid);
-        View gear = tile(new GearDrawable(), false, "Settings", 84, this::showSettings, null, "#gear");
-        dock.addView(gear);
-        if ("#grid".equals(keep)) focusTarget = grid;
-        if ("#gear".equals(keep)) focusTarget = gear;
+        animateIn = false;
+        appsTitle.setText("Your apps");
         final View ft = focusTarget;
-        dock.post(() -> {
-            if (overlay != null) return;
+        appsRow.post(() -> {
+            if (overlay != null || panel != null) return;
             if (ft != null) ft.requestFocus();
             else focusFirst();
         });
     }
 
     void focusFirst() {
-        if (dock != null && dock.getChildCount() > 0) dock.getChildAt(0).requestFocus();
+        if (appsRow != null && appsRow.getChildCount() > 0) appsRow.getChildAt(0).requestFocus();
+        else if (gridBtn != null) gridBtn.requestFocus();
     }
 
-    void appMenu(String pkg) {
+    void appMenu(String pkg, View anchor) {
         final List<String> d = getDock();
         final boolean in = d.contains(pkg);
-        List<String> items = new ArrayList<>();
-        items.add("Open");
-        items.add(in ? "Remove from dock" : "Add to dock");
+        List<Item> items = new ArrayList<>();
+        items.add(new Item("Open", () -> launch(pkg, anchor)));
         if (in) {
-            items.add("Move left");
-            items.add("Move right");
+            items.add(new Item("Move left", () -> moveApp(pkg, -1)));
+            items.add(new Item("Move right", () -> moveApp(pkg, 1)));
+            items.add(new Item("Remove from home", () -> {
+                d.remove(pkg);
+                saveDock(d);
+                focusPkg = null;
+                refreshApps();
+            }));
+        } else {
+            items.add(new Item("Add to home", () -> {
+                d.add(pkg);
+                saveDock(d);
+                closeOverlay(false);
+                focusPkg = pkg;
+                refreshApps();
+            }));
         }
-        new AlertDialog.Builder(this)
-                .setTitle(appName(pkg))
-                .setItems(items.toArray(new String[0]), (dlg, w) -> {
-                    String c = items.get(w);
-                    int i = d.indexOf(pkg);
-                    if (c.equals("Open")) {
-                        launch(pkg);
-                        return;
-                    } else if (c.equals("Add to dock")) {
-                        d.add(pkg);
-                    } else if (c.equals("Remove from dock")) {
-                        d.remove(pkg);
-                    } else if (c.equals("Move left") && i > 0) {
-                        Collections.swap(d, i, i - 1);
-                    } else if (c.equals("Move right") && i >= 0 && i < d.size() - 1) {
-                        Collections.swap(d, i, i + 1);
-                    }
-                    saveDock(d);
-                    focusPkg = pkg;
-                    refreshDock();
-                })
-                .show();
+        showPanel(anchor, appName(pkg), items);
+    }
+
+    void moveApp(String pkg, int dir) {
+        List<String> d = getDock();
+        int i = d.indexOf(pkg);
+        int j = i + dir;
+        if (i < 0 || j < 0 || j >= d.size()) return;
+        Collections.swap(d, i, j);
+        saveDock(d);
+        focusPkg = pkg;
+        refreshApps();
     }
 
     // ---------------------------------------------------------------- apps
@@ -612,7 +750,8 @@ public class MainActivity extends Activity {
         }
     }
 
-    void launch(String p) {
+    /** Opens an app so that it grows out of the card you clicked. */
+    void launch(String p, View from) {
         Intent i = pm.getLeanbackLaunchIntentForPackage(p);
         if (i == null) i = pm.getLaunchIntentForPackage(p);
         if (i == null) {
@@ -621,7 +760,12 @@ public class MainActivity extends Activity {
         }
         i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
         try {
-            startActivity(i);
+            if (from != null && from.isAttachedToWindow()) {
+                ActivityOptions o = ActivityOptions.makeScaleUpAnimation(from, 0, 0, from.getWidth(), from.getHeight());
+                startActivity(i, o.toBundle());
+            } else {
+                startActivity(i);
+            }
         } catch (Exception e) {
             Toast.makeText(this, "Can't open " + appName(p), Toast.LENGTH_SHORT).show();
         }
@@ -643,54 +787,169 @@ public class MainActivity extends Activity {
         return l;
     }
 
-    void showAllApps() {
-        closeOverlay();
+    View overlayAnchor;
+
+    void showAllApps(View anchor) {
+        closeOverlay(false);
+        overlayAnchor = anchor;
         overlay = new FrameLayout(this);
-        overlay.setBackgroundColor(0xE6000000);
+        overlay.setBackgroundColor(0xD8060A10);
+        overlay.setVisibility(View.INVISIBLE);
+        LinearLayout col = new LinearLayout(this);
+        col.setOrientation(LinearLayout.VERTICAL);
+        col.setPadding(dp(56), dp(32), dp(56), dp(32));
+        TextView title = new TextView(this);
+        title.setText("All apps");
+        title.setTextColor(Color.WHITE);
+        title.setTextSize(TypedValue.COMPLEX_UNIT_SP, 26);
+        title.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        title.setPadding(dp(6), 0, 0, dp(10));
+        col.addView(title);
         ScrollView sv = new ScrollView(this);
         sv.setClipChildren(false);
+        sv.setClipToPadding(false);
         GridLayout g = new GridLayout(this);
         g.setColumnCount(5);
-        g.setPadding(dp(48), dp(40), dp(48), dp(40));
+        g.setPadding(0, dp(8), 0, dp(24));
         g.setClipChildren(false);
         g.setClipToPadding(false);
         View first = null;
+        int i = 0;
         for (String p : allApps()) {
             final String pkg = p;
-            Drawable ban = banner(pkg);
             LinearLayout cell = new LinearLayout(this);
             cell.setOrientation(LinearLayout.VERTICAL);
             cell.setGravity(Gravity.CENTER_HORIZONTAL);
             cell.setClipChildren(false);
-            View t = tile(ban != null ? ban : icon(pkg), ban != null, appName(pkg), 150, () -> {
-                closeOverlay();
-                launch(pkg);
-            }, () -> appMenu(pkg), pkg);
+            final View[] holder = new View[1];
+            View t = appCard(pkg, 150, 84, () -> appMenu(pkg, holder[0]));
+            holder[0] = t;
             cell.addView(t);
             TextView n = new TextView(this);
             n.setText(appName(pkg));
-            n.setTextColor(0xDDFFFFFF);
+            n.setTextColor(0xCCFFFFFF);
             n.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
             n.setGravity(Gravity.CENTER);
+            n.setPadding(0, dp(2), 0, dp(10));
             cell.addView(n);
+            cell.setAlpha(0f);
+            cell.setTranslationY(dp(20));
+            cell.animate().alpha(1f).translationY(0).setStartDelay(200 + Math.min(i, 20) * 25L).setDuration(380).start();
             g.addView(cell);
             if (first == null) first = t;
+            i++;
         }
         sv.addView(g);
-        overlay.addView(sv, new FrameLayout.LayoutParams(-2, -1, Gravity.CENTER_HORIZONTAL));
+        col.addView(sv, new LinearLayout.LayoutParams(-1, -1));
+        overlay.addView(col, new FrameLayout.LayoutParams(-1, -1));
         root.addView(overlay, new FrameLayout.LayoutParams(-1, -1));
+        reveal(overlay, anchor, true, null);
         if (first != null) {
             final View f = first;
-            overlay.post(f::requestFocus);
+            overlay.postDelayed(f::requestFocus, 120);
+        }
+        appsTitle.setText("Your apps");
+    }
+
+    void closeOverlay(boolean animate) {
+        if (overlay == null) return;
+        final FrameLayout o = overlay;
+        overlay = null;
+        if (animate) {
+            reveal(o, overlayAnchor, false, () -> root.removeView(o));
+            if (overlayAnchor != null) overlayAnchor.requestFocus();
+        } else {
+            root.removeView(o);
+        }
+        refreshApps();
+    }
+
+    // ---------------------------------------------------------------- glass panel (menus)
+
+    View panelAnchor;
+
+    void showPanel(View anchor, String title, List<Item> items) {
+        closePanel(false);
+        panelAnchor = anchor;
+        panel = new FrameLayout(this);
+        panel.setBackgroundColor(0x66000000);
+        panel.setClickable(true);
+        panel.setAlpha(0f);
+        panel.animate().alpha(1f).setDuration(250).start();
+
+        LinearLayout card = new LinearLayout(this);
+        card.setOrientation(LinearLayout.VERTICAL);
+        card.setPadding(dp(14), dp(16), dp(14), dp(14));
+        GradientDrawable bg = new GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM,
+                new int[]{0xE6202830, 0xF0101418});
+        bg.setCornerRadius(dp(26));
+        bg.setStroke(dp(1), 0x66FFFFFF);
+        card.setBackground(bg);
+        card.setVisibility(View.INVISIBLE);
+        card.setElevation(dp(20));
+
+        TextView t = new TextView(this);
+        t.setText(title);
+        t.setTextColor(Color.WHITE);
+        t.setTextSize(TypedValue.COMPLEX_UNIT_SP, 20);
+        t.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        t.setPadding(dp(12), 0, dp(12), dp(10));
+        card.addView(t);
+
+        View first = null;
+        int i = 0;
+        for (Item it : items) {
+            TextView row = new TextView(this);
+            row.setText(it.text);
+            row.setTextColor(0xF0FFFFFF);
+            row.setTextSize(TypedValue.COMPLEX_UNIT_SP, 17);
+            row.setPadding(dp(14), dp(11), dp(14), dp(11));
+            row.setFocusable(true);
+            row.setClickable(true);
+            StateListDrawable sl = new StateListDrawable();
+            GradientDrawable on = new GradientDrawable();
+            on.setCornerRadius(dp(14));
+            on.setColor(0xF2FFFFFF);
+            sl.addState(new int[]{android.R.attr.state_focused}, on);
+            sl.addState(new int[]{}, new ColorDrawable(Color.TRANSPARENT));
+            row.setBackground(sl);
+            row.setOnFocusChangeListener((v, has) -> {
+                ((TextView) v).setTextColor(has ? 0xFF0E1216 : 0xF0FFFFFF);
+                v.animate().translationX(has ? dp(4) : 0).setDuration(150).start();
+            });
+            row.setOnClickListener(v -> {
+                closePanel(false);
+                it.action.run();
+            });
+            row.setAlpha(0f);
+            row.setTranslationY(dp(10));
+            row.animate().alpha(1f).translationY(0).setStartDelay(160 + i * 35L).setDuration(260).start();
+            card.addView(row, new LinearLayout.LayoutParams(-1, -2));
+            if (first == null) first = row;
+            i++;
+        }
+
+        ScrollView sv = new ScrollView(this);
+        sv.addView(card);
+        panel.addView(sv, new FrameLayout.LayoutParams(dp(470), -2, Gravity.CENTER));
+        root.addView(panel, new FrameLayout.LayoutParams(-1, -1));
+        reveal(card, anchor, true, null);
+        if (first != null) {
+            final View f = first;
+            panel.postDelayed(f::requestFocus, 60);
         }
     }
 
-    void closeOverlay() {
-        if (overlay != null) {
-            root.removeView(overlay);
-            overlay = null;
-            refreshDock();
+    void closePanel(boolean animate) {
+        if (panel == null) return;
+        final FrameLayout p = panel;
+        panel = null;
+        if (animate) {
+            p.animate().alpha(0f).setDuration(220).withEndAction(() -> root.removeView(p)).start();
+        } else {
+            root.removeView(p);
         }
+        if (panelAnchor != null && panelAnchor.isAttachedToWindow()) panelAnchor.requestFocus();
     }
 
     // ---------------------------------------------------------------- settings
@@ -699,93 +958,84 @@ public class MainActivity extends Activity {
         return m == 0 ? "Off" : m + " min";
     }
 
-    void showSettings() {
+    void showSettings(View anchor) {
         boolean panOn = prefs.getBoolean("pan", true);
         boolean h24 = prefs.getBoolean("h24", true);
         boolean showClock = prefs.getBoolean("clock", true);
         int bgChoice = prefs.getInt("bg", -1);
         String wpLabel = bgChoice == -1 ? "All (rotating)" : bgChoice == 0 ? "Own picture" : WALLPAPER_NAMES[bgChoice - 1];
-        String[] items = {
-                "Wallpaper: " + wpLabel,
-                "Change wallpaper every: " + rotateLabel(prefs.getInt("rotate", 5)),
-                "Next wallpaper now",
-                "Moving wallpaper: " + (panOn ? "On" : "Off"),
-                "Clock: " + (showClock ? "Shown" : "Hidden"),
-                "Clock transparency: " + (100 - clockAlpha()) + "%",
-                "Clock format: " + (h24 ? "24h" : "12h"),
-                "Home button (turn on the Home service)",
-                "Android settings",
-                "Reset dock"
-        };
-        new AlertDialog.Builder(this)
-                .setTitle("Settings")
-                .setItems(items, (d, w) -> {
-                    switch (w) {
-                        case 0:
-                            chooseWallpaper();
-                            break;
-                        case 1:
-                            chooseRotate();
-                            break;
-                        case 2:
-                            prefs.edit().putInt("bg", -1).apply();
-                            showWallpaper((wpIndex + 1 + WALLPAPERS.length) % WALLPAPERS.length, true);
-                            prefs.edit().putInt("lastWp", wpIndex).apply();
-                            scheduleRotate();
-                            break;
-                        case 3:
-                            prefs.edit().putBoolean("pan", !panOn).apply();
-                            startPan();
-                            break;
-                        case 4:
-                            prefs.edit().putBoolean("clock", !showClock).apply();
-                            applyClock();
-                            break;
-                        case 5:
-                            chooseTransparency();
-                            break;
-                        case 6:
-                            prefs.edit().putBoolean("h24", !h24).apply();
-                            applyClock();
-                            break;
-                        case 7:
-                            openSafe(new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS));
-                            break;
-                        case 8:
-                            openSafe(new Intent(Settings.ACTION_SETTINGS));
-                            break;
-                        case 9:
-                            prefs.edit().remove("dock").apply();
-                            refreshDock();
-                            break;
-                    }
-                })
-                .show();
+        List<Item> items = new ArrayList<>();
+        items.add(new Item("Wallpaper: " + wpLabel, () -> chooseWallpaper(anchor)));
+        items.add(new Item("Change wallpaper every: " + rotateLabel(prefs.getInt("rotate", 5)), () -> chooseRotate(anchor)));
+        items.add(new Item("Next wallpaper now", () -> {
+            prefs.edit().putInt("bg", -1).apply();
+            showWallpaper((wpIndex + 1 + WALLPAPERS.length) % WALLPAPERS.length, true);
+            prefs.edit().putInt("lastWp", wpIndex).apply();
+            scheduleRotate();
+        }));
+        items.add(new Item("Moving wallpaper: " + (panOn ? "On" : "Off"), () -> {
+            prefs.edit().putBoolean("pan", !panOn).apply();
+            startPan();
+        }));
+        items.add(new Item("Clock: " + (showClock ? "Shown" : "Hidden"), () -> {
+            prefs.edit().putBoolean("clock", !showClock).apply();
+            applyClock();
+        }));
+        items.add(new Item("Clock transparency: " + (100 - clockAlpha()) + "%", () -> chooseTransparency(anchor)));
+        items.add(new Item("Clock format: " + (h24 ? "24h" : "12h"), () -> {
+            prefs.edit().putBoolean("h24", !h24).apply();
+            applyClock();
+        }));
+        items.add(new Item("Home button (turn on the Home service)",
+                () -> openSafe(new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))));
+        items.add(new Item("Android settings", () -> openSafe(new Intent(Settings.ACTION_SETTINGS))));
+        items.add(new Item("Reset apps", () -> {
+            prefs.edit().remove("dock").apply();
+            refreshApps();
+        }));
+        showPanel(anchor, "Settings", items);
     }
 
-    void chooseRotate() {
-        String[] items = new String[ROTATE_MIN.length];
-        for (int i = 0; i < items.length; i++) items[i] = rotateLabel(ROTATE_MIN[i]);
-        new AlertDialog.Builder(this)
-                .setTitle("Change wallpaper every")
-                .setItems(items, (d, w) -> {
-                    prefs.edit().putInt("rotate", ROTATE_MIN[w]).apply();
-                    scheduleRotate();
-                })
-                .show();
+    void chooseRotate(View anchor) {
+        List<Item> items = new ArrayList<>();
+        for (int m : ROTATE_MIN) {
+            items.add(new Item(rotateLabel(m), () -> {
+                prefs.edit().putInt("rotate", m).apply();
+                scheduleRotate();
+            }));
+        }
+        showPanel(anchor, "Change wallpaper every", items);
     }
 
-    void chooseTransparency() {
-        final int[] levels = {0, 15, 25, 40, 55, 70};
-        String[] items = new String[levels.length];
-        for (int i = 0; i < levels.length; i++) items[i] = levels[i] + "%" + (levels[i] == 0 ? " (solid)" : "");
-        new AlertDialog.Builder(this)
-                .setTitle("Clock transparency")
-                .setItems(items, (d, w) -> {
-                    prefs.edit().putInt("clockAlpha", 100 - levels[w]).apply();
-                    paintClock();
-                })
-                .show();
+    void chooseTransparency(View anchor) {
+        List<Item> items = new ArrayList<>();
+        for (int lvl : new int[]{0, 20, 40, 55, 70, 85}) {
+            items.add(new Item(lvl + "%" + (lvl == 0 ? " (solid)" : ""), () -> {
+                prefs.edit().putInt("clockAlpha", 100 - lvl).apply();
+                paintClock();
+            }));
+        }
+        showPanel(anchor, "Clock transparency", items);
+    }
+
+    void chooseWallpaper(View anchor) {
+        List<Item> items = new ArrayList<>();
+        items.add(new Item("All (rotating)", () -> {
+            prefs.edit().putInt("bg", -1).apply();
+            scheduleRotate();
+        }));
+        for (int i = 0; i < WALLPAPERS.length; i++) {
+            final int idx = i;
+            items.add(new Item(WALLPAPER_NAMES[i], () -> {
+                prefs.edit().putInt("bg", idx + 1).apply();
+                showWallpaper(idx, true);
+            }));
+        }
+        items.add(new Item("Own picture (bakgrund.jpg)", () -> {
+            prefs.edit().putInt("bg", 0).apply();
+            applyWallpaper();
+        }));
+        showPanel(anchor, "Wallpaper", items);
     }
 
     void openSafe(Intent i) {
@@ -795,26 +1045,6 @@ public class MainActivity extends Activity {
         } catch (Exception e) {
             Toast.makeText(this, "Couldn't open settings", Toast.LENGTH_SHORT).show();
         }
-    }
-
-    void chooseWallpaper() {
-        String[] items = new String[WALLPAPERS.length + 2];
-        items[0] = "All (rotating)";
-        for (int i = 0; i < WALLPAPERS.length; i++) items[i + 1] = WALLPAPER_NAMES[i];
-        items[items.length - 1] = "Own picture (bakgrund.jpg)";
-        new AlertDialog.Builder(this)
-                .setTitle("Wallpaper")
-                .setItems(items, (d, w) -> {
-                    int v = w == 0 ? -1 : (w == items.length - 1 ? 0 : w);
-                    prefs.edit().putInt("bg", v).apply();
-                    if (v > 0) {
-                        showWallpaper(v - 1, true);
-                    } else if (v == 0) {
-                        applyWallpaper();
-                    }
-                    scheduleRotate();
-                })
-                .show();
     }
 
     // ---------------------------------------------------------------- icons
