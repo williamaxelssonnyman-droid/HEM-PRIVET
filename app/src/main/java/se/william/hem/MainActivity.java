@@ -33,6 +33,8 @@ import android.graphics.drawable.ColorDrawable;
 import android.graphics.drawable.Drawable;
 import android.graphics.drawable.GradientDrawable;
 import android.graphics.drawable.StateListDrawable;
+import android.graphics.RenderEffect;
+import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
@@ -41,6 +43,7 @@ import android.text.Editable;
 import android.text.TextWatcher;
 import android.util.TypedValue;
 import android.view.Gravity;
+import android.view.KeyEvent;
 import android.view.View;
 import android.view.ViewAnimationUtils;
 import android.view.ViewOutlineProvider;
@@ -59,6 +62,9 @@ import android.widget.TextView;
 import android.widget.Toast;
 
 import java.io.File;
+import java.text.SimpleDateFormat;
+import java.util.Date;
+import java.util.Locale;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -87,10 +93,18 @@ public class MainActivity extends Activity {
 
     static class Item {
         final String text;
+        final String value;
+        final boolean stay;
         final Runnable action;
 
         Item(String text, Runnable action) {
+            this(text, null, false, action);
+        }
+
+        Item(String text, String value, boolean stay, Runnable action) {
             this.text = text;
+            this.value = value;
+            this.stay = stay;
             this.action = action;
         }
     }
@@ -107,8 +121,19 @@ public class MainActivity extends Activity {
     int wpIndex = -1;
     LinearLayout appsRow;
     TextView appsTitle;
-    TextClock clock;
+    ClockView clock;
     TextClock date;
+    FrameLayout home;
+    LinearLayout bottomBar;
+    boolean ambient = false;
+    final Runnable ambientTask = this::enterAmbient;
+    final Runnable timeTask = new Runnable() {
+        @Override
+        public void run() {
+            updateTime(true);
+            handler.postDelayed(this, 1000);
+        }
+    };
     View clockBox;
     View gridBtn, gearBtn;
     FrameLayout overlay;
@@ -116,7 +141,6 @@ public class MainActivity extends Activity {
     ObjectAnimator pan;
     String focusPkg;
     int tint = 0xFFB8D8E8;
-    String lastTime = "";
     boolean animateIn = true;
 
     final Runnable rotateTask = new Runnable() {
@@ -149,6 +173,10 @@ public class MainActivity extends Activity {
         refreshApps();
         startPan();
         scheduleRotate();
+        updateTime(false);
+        handler.removeCallbacks(timeTask);
+        handler.postDelayed(timeTask, 1000);
+        exitAmbient(false);
         introAnimation();
     }
 
@@ -157,6 +185,18 @@ public class MainActivity extends Activity {
         super.onPause();
         if (pan != null) pan.cancel();
         handler.removeCallbacks(rotateTask);
+        handler.removeCallbacks(timeTask);
+        handler.removeCallbacks(ambientTask);
+    }
+
+    @Override
+    public boolean dispatchKeyEvent(KeyEvent e) {
+        if (ambient) {
+            if (e.getAction() == KeyEvent.ACTION_UP) exitAmbient(true);
+            return true;
+        }
+        scheduleAmbient();
+        return super.dispatchKeyEvent(e);
     }
 
     @Override
@@ -203,6 +243,9 @@ public class MainActivity extends Activity {
         root = new FrameLayout(this);
         root.setBackgroundColor(Color.BLACK);
         root.setClipChildren(false);
+        home = new FrameLayout(this);
+        home.setClipChildren(false);
+        root.addView(home, new FrameLayout.LayoutParams(-1, -1));
 
         panLayer = new FrameLayout(this);
         bgA = new ImageView(this);
@@ -212,19 +255,19 @@ public class MainActivity extends Activity {
             panLayer.addView(iv, new FrameLayout.LayoutParams(-1, -1));
         }
         bgB.setAlpha(0f);
-        root.addView(panLayer, new FrameLayout.LayoutParams(-1, -1));
+        home.addView(panLayer, new FrameLayout.LayoutParams(-1, -1));
 
         View shade = new View(this);
         shade.setBackground(new GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM,
                 new int[]{0x40000000, 0x00000000, 0x10000000, 0xB0000000}));
-        root.addView(shade, new FrameLayout.LayoutParams(-1, -1));
+        home.addView(shade, new FrameLayout.LayoutParams(-1, -1));
 
         FrameLayout content = new FrameLayout(this);
         content.setClipChildren(false);
         content.setClipToPadding(false);
         // Old TVs crop the picture edges (overscan): keep everything inside a safe area.
         content.setPadding(dp(48), dp(27), dp(48), dp(27));
-        root.addView(content, new FrameLayout.LayoutParams(-1, -1));
+        home.addView(content, new FrameLayout.LayoutParams(-1, -1));
 
         // Top right: round glass buttons.
         LinearLayout topRight = new LinearLayout(this);
@@ -249,33 +292,22 @@ public class MainActivity extends Activity {
         date.setShadowLayer(10, 0, 2, 0x88000000);
         center.addView(date);
 
-        clock = new TextClock(this);
-        clock.setTextSize(TypedValue.COMPLEX_UNIT_SP, 230);
+        clock = new ClockView(this);
         clock.setTypeface(clockTypeface());
-        clock.setIncludeFontPadding(false);
-        clock.setLetterSpacing(0.01f);
-        clock.addOnLayoutChangeListener((v, l, t, r, btm, ol, ot, orr, ob) -> paintClock());
-        clock.addTextChangedListener(new TextWatcher() {
-            @Override public void beforeTextChanged(CharSequence s, int a, int b, int c) { }
-            @Override public void onTextChanged(CharSequence s, int a, int b, int c) { }
-            @Override
-            public void afterTextChanged(Editable e) {
-                String now = e.toString();
-                if (!lastTime.isEmpty() && !now.equals(lastTime)) tickAnimation();
-                lastTime = now;
-            }
-        });
-        LinearLayout.LayoutParams clockLp = new LinearLayout.LayoutParams(-2, -2);
-        clockLp.topMargin = -dp(6);
+        clock.setTextSizePx(TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_SP, 290,
+                getResources().getDisplayMetrics()));
+        LinearLayout.LayoutParams clockLp = new LinearLayout.LayoutParams(-1, -2);
+        clockLp.topMargin = -dp(4);
         center.addView(clock, clockLp);
 
         clockBox = center;
-        FrameLayout.LayoutParams clp = new FrameLayout.LayoutParams(-2, -2, Gravity.CENTER_HORIZONTAL | Gravity.TOP);
-        clp.topMargin = dp(8);
+        FrameLayout.LayoutParams clp = new FrameLayout.LayoutParams(-1, -2, Gravity.CENTER_HORIZONTAL | Gravity.TOP);
+        clp.topMargin = dp(6);
         content.addView(center, clp);
 
         // Bottom left: "Apps" title + row of app cards.
         LinearLayout bottom = new LinearLayout(this);
+        bottomBar = bottom;
         bottom.setOrientation(LinearLayout.VERTICAL);
         bottom.setClipChildren(false);
         bottom.setClipToPadding(false);
@@ -389,13 +421,6 @@ public class MainActivity extends Activity {
         appsTitle.animate().alpha(1f).setStartDelay(200).setDuration(600).start();
     }
 
-    void tickAnimation() {
-        clock.setTranslationY(dp(28));
-        clock.setAlpha(0f);
-        clock.animate().translationY(0).alpha(1f).setDuration(900)
-                .setInterpolator(new OvershootInterpolator(0.9f)).start();
-    }
-
     // ---------------------------------------------------------------- clock
 
     int clockAlpha() {
@@ -403,24 +428,73 @@ public class MainActivity extends Activity {
     }
 
     void paintClock() {
-        int h = clock.getHeight();
-        if (h <= 0) return;
-        int a = Math.round(255 * clockAlpha() / 100f);
-        int top = withAlpha(mix(tint, Color.WHITE, 0.55f), Math.min(255, a + 25));
-        int mid = withAlpha(tint, a);
-        int bottom = withAlpha(mix(tint, Color.WHITE, 0.25f), Math.max(25, a - 90));
-        clock.getPaint().setShader(new LinearGradient(0, 0, 0, h,
-                new int[]{top, mid, bottom}, new float[]{0f, 0.55f, 1f}, Shader.TileMode.CLAMP));
-        clock.invalidate();
+        if (clock == null) return;
+        clock.setAlphaPercent(clockAlpha());
+        clock.setGlow(withAlpha(tint, 70));
+    }
+
+    void updateTime(boolean animate) {
+        boolean h24 = prefs.getBoolean("h24", true);
+        String t = new SimpleDateFormat(h24 ? "HH:mm" : "h:mm", Locale.getDefault()).format(new Date());
+        clock.setTime(t, animate);
+    }
+
+    // ---------------------------------------------------------------- ambient mode
+
+    void scheduleAmbient() {
+        handler.removeCallbacks(ambientTask);
+        if (prefs.getBoolean("ambient", true) && panel == null && overlay == null) {
+            handler.postDelayed(ambientTask, 60_000);
+        }
+    }
+
+    void enterAmbient() {
+        if (panel != null || overlay != null || ambient) return;
+        ambient = true;
+        bottomBar.animate().alpha(0f).translationY(dp(60)).setDuration(1200)
+                .setInterpolator(new AccelerateDecelerateInterpolator()).start();
+        gridBtn.animate().alpha(0f).setDuration(800).start();
+        gearBtn.animate().alpha(0f).setDuration(800).start();
+        clockBox.animate().translationY(dp(70)).scaleX(1.06f).scaleY(1.06f).setDuration(1600)
+                .setInterpolator(new AccelerateDecelerateInterpolator()).start();
+    }
+
+    void exitAmbient(boolean animate) {
+        ambient = false;
+        long d = animate ? 600 : 0;
+        bottomBar.animate().alpha(1f).translationY(0).setDuration(d)
+                .setInterpolator(new DecelerateInterpolator(2f)).start();
+        gridBtn.animate().alpha(1f).setDuration(d).start();
+        gearBtn.animate().alpha(1f).setDuration(d).start();
+        clockBox.animate().translationY(0).scaleX(1f).scaleY(1f).setDuration(d)
+                .setInterpolator(new DecelerateInterpolator(2f)).start();
+        scheduleAmbient();
+    }
+
+    // ---------------------------------------------------------------- blur
+
+    ValueAnimator blurAnim;
+
+    void setBlur(boolean on) {
+        if (Build.VERSION.SDK_INT < 31) return;
+        if (blurAnim != null) blurAnim.cancel();
+        if (on && pan != null) pan.pause();
+        if (!on && pan != null) pan.resume();
+        float from = on ? 0f : dp(22);
+        float to = on ? dp(22) : 0f;
+        blurAnim = ValueAnimator.ofFloat(from, to);
+        blurAnim.setDuration(on ? 380 : 260);
+        blurAnim.addUpdateListener(a -> {
+            float r = (float) a.getAnimatedValue();
+            home.setRenderEffect(r < 0.5f ? null : RenderEffect.createBlurEffect(r, r, Shader.TileMode.CLAMP));
+        });
+        blurAnim.start();
     }
 
     void applyClock() {
-        boolean h24 = prefs.getBoolean("h24", true);
-        String f = h24 ? "HH:mm" : "h:mm";
-        clock.setFormat24Hour(f);
-        clock.setFormat12Hour(f);
         clockBox.setVisibility(prefs.getBoolean("clock", true) ? View.VISIBLE : View.INVISIBLE);
         paintClock();
+        if (clock != null && !clock.text.isEmpty()) updateTime(false);
     }
 
     static int withAlpha(int c, int a) {
@@ -497,6 +571,7 @@ public class MainActivity extends Activity {
 
     void setWallpaperBitmap(Bitmap b, boolean animate) {
         final int newTint = pickTint(b);
+        clock.setGlass(ClockView.makeGlass(b), animate);
         ImageView front = aOnTop ? bgA : bgB;
         ImageView back = aOnTop ? bgB : bgA;
         if (!animate) {
@@ -552,6 +627,7 @@ public class MainActivity extends Activity {
         panLayer.setScaleX(1.12f);
         panLayer.setScaleY(1.12f);
         panLayer.setTranslationX(0);
+        clock.setPan(0, 1.12f);
         if (!prefs.getBoolean("pan", true)) return;
         float dx = getResources().getDisplayMetrics().widthPixels * 0.05f;
         pan = ObjectAnimator.ofFloat(panLayer, "translationX", -dx, dx);
@@ -559,6 +635,7 @@ public class MainActivity extends Activity {
         pan.setRepeatMode(ValueAnimator.REVERSE);
         pan.setRepeatCount(ValueAnimator.INFINITE);
         pan.setInterpolator(new AccelerateDecelerateInterpolator());
+        pan.addUpdateListener(a -> clock.setPan(panLayer.getTranslationX(), panLayer.getScaleX()));
         pan.start();
     }
 
@@ -605,7 +682,11 @@ public class MainActivity extends Activity {
         f.setOnFocusChangeListener((v, has) -> {
             v.animate().scaleX(has ? 1.1f : 1f).scaleY(has ? 1.1f : 1f).translationY(has ? -dp(6) : 0)
                     .setDuration(220).setInterpolator(new OvershootInterpolator(1.4f)).start();
-            v.setElevation(has ? dp(14) : 0);
+            v.setElevation(has ? dp(18) : 0);
+            if (Build.VERSION.SDK_INT >= 28) {
+                v.setOutlineSpotShadowColor(tint);
+                v.setOutlineAmbientShadowColor(tint);
+            }
             f.setForeground(has ? ring : null);
             if (has) {
                 appsTitle.setText(name);
@@ -793,7 +874,7 @@ public class MainActivity extends Activity {
         closeOverlay(false);
         overlayAnchor = anchor;
         overlay = new FrameLayout(this);
-        overlay.setBackgroundColor(0xD8060A10);
+        overlay.setBackgroundColor(0x99060A10);
         overlay.setVisibility(View.INVISIBLE);
         LinearLayout col = new LinearLayout(this);
         col.setOrientation(LinearLayout.VERTICAL);
@@ -843,6 +924,8 @@ public class MainActivity extends Activity {
         col.addView(sv, new LinearLayout.LayoutParams(-1, -1));
         overlay.addView(col, new FrameLayout.LayoutParams(-1, -1));
         root.addView(overlay, new FrameLayout.LayoutParams(-1, -1));
+        setBlur(true);
+        handler.removeCallbacks(ambientTask);
         reveal(overlay, anchor, true, null);
         if (first != null) {
             final View f = first;
@@ -855,6 +938,8 @@ public class MainActivity extends Activity {
         if (overlay == null) return;
         final FrameLayout o = overlay;
         overlay = null;
+        if (panel == null) setBlur(false);
+        scheduleAmbient();
         if (animate) {
             reveal(o, overlayAnchor, false, () -> root.removeView(o));
             if (overlayAnchor != null) overlayAnchor.requestFocus();
@@ -867,75 +952,152 @@ public class MainActivity extends Activity {
     // ---------------------------------------------------------------- glass panel (menus)
 
     View panelAnchor;
+    Runnable panelRebuild;
 
+    /** A frosted side sheet that grows out of the button you pressed. */
     void showPanel(View anchor, String title, List<Item> items) {
-        closePanel(false);
+        showPanel(anchor, title, items, true, 0);
+    }
+
+    void showPanel(View anchor, String title, List<Item> items, boolean animate, int focusIndex) {
+        boolean wasOpen = panel != null;
+        if (wasOpen) {
+            root.removeView(panel);
+            panel = null;
+        }
         panelAnchor = anchor;
+        if (!wasOpen) setBlur(true);
+        handler.removeCallbacks(ambientTask);
+
         panel = new FrameLayout(this);
-        panel.setBackgroundColor(0x66000000);
         panel.setClickable(true);
-        panel.setAlpha(0f);
-        panel.animate().alpha(1f).setDuration(250).start();
+        View dim = new View(this);
+        dim.setBackground(new GradientDrawable(GradientDrawable.Orientation.LEFT_RIGHT,
+                new int[]{0x22000000, 0x66000000, 0x99000000}));
+        panel.addView(dim, new FrameLayout.LayoutParams(-1, -1));
+        if (animate && !wasOpen) {
+            dim.setAlpha(0f);
+            dim.animate().alpha(1f).setDuration(300).start();
+        }
 
         LinearLayout card = new LinearLayout(this);
         card.setOrientation(LinearLayout.VERTICAL);
-        card.setPadding(dp(14), dp(16), dp(14), dp(14));
+        card.setPadding(dp(18), dp(22), dp(18), dp(18));
         GradientDrawable bg = new GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM,
-                new int[]{0xE6202830, 0xF0101418});
-        bg.setCornerRadius(dp(26));
-        bg.setStroke(dp(1), 0x66FFFFFF);
+                new int[]{0xC8262E36, 0xD8161B21, 0xE60E1216});
+        bg.setCornerRadius(dp(30));
+        bg.setStroke(dp(1), 0x40FFFFFF);
         card.setBackground(bg);
-        card.setVisibility(View.INVISIBLE);
-        card.setElevation(dp(20));
+        card.setElevation(dp(24));
+        card.setClipToPadding(false);
+
+        // accent line in the wallpaper colour
+        View accent = new View(this);
+        GradientDrawable ac = new GradientDrawable(GradientDrawable.Orientation.LEFT_RIGHT,
+                new int[]{withAlpha(tint, 255), withAlpha(tint, 0)});
+        ac.setCornerRadius(dp(2));
+        accent.setBackground(ac);
+        LinearLayout.LayoutParams alp = new LinearLayout.LayoutParams(dp(56), dp(4));
+        alp.setMargins(dp(12), 0, 0, dp(12));
+        card.addView(accent, alp);
 
         TextView t = new TextView(this);
         t.setText(title);
         t.setTextColor(Color.WHITE);
-        t.setTextSize(TypedValue.COMPLEX_UNIT_SP, 20);
+        t.setTextSize(TypedValue.COMPLEX_UNIT_SP, 26);
         t.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
-        t.setPadding(dp(12), 0, dp(12), dp(10));
+        t.setPadding(dp(12), 0, dp(12), dp(14));
         card.addView(t);
 
-        View first = null;
+        List<View> rows = new ArrayList<>();
         int i = 0;
         for (Item it : items) {
-            TextView row = new TextView(this);
-            row.setText(it.text);
-            row.setTextColor(0xF0FFFFFF);
-            row.setTextSize(TypedValue.COMPLEX_UNIT_SP, 17);
-            row.setPadding(dp(14), dp(11), dp(14), dp(11));
+            final int index = i;
+            LinearLayout row = new LinearLayout(this);
+            row.setOrientation(LinearLayout.HORIZONTAL);
+            row.setGravity(Gravity.CENTER_VERTICAL);
+            row.setPadding(dp(16), dp(13), dp(16), dp(13));
             row.setFocusable(true);
             row.setClickable(true);
-            StateListDrawable sl = new StateListDrawable();
             GradientDrawable on = new GradientDrawable();
-            on.setCornerRadius(dp(14));
-            on.setColor(0xF2FFFFFF);
+            on.setCornerRadius(dp(18));
+            on.setColor(0xF5FFFFFF);
+            StateListDrawable sl = new StateListDrawable();
             sl.addState(new int[]{android.R.attr.state_focused}, on);
             sl.addState(new int[]{}, new ColorDrawable(Color.TRANSPARENT));
             row.setBackground(sl);
+
+            TextView name = new TextView(this);
+            name.setText(it.text);
+            name.setTextColor(0xF2FFFFFF);
+            name.setTextSize(TypedValue.COMPLEX_UNIT_SP, 18);
+            row.addView(name, new LinearLayout.LayoutParams(0, -2, 1f));
+
+            TextView val = null;
+            if (it.value != null) {
+                val = new TextView(this);
+                val.setText(it.value);
+                val.setTextColor(0x99FFFFFF);
+                val.setTextSize(TypedValue.COMPLEX_UNIT_SP, 16);
+                val.setPadding(dp(12), dp(3), dp(12), dp(3));
+                GradientDrawable pill = new GradientDrawable();
+                pill.setCornerRadius(dp(12));
+                pill.setColor(0x1FFFFFFF);
+                val.setBackground(pill);
+                row.addView(val);
+            }
+            final TextView fv = val;
             row.setOnFocusChangeListener((v, has) -> {
-                ((TextView) v).setTextColor(has ? 0xFF0E1216 : 0xF0FFFFFF);
-                v.animate().translationX(has ? dp(4) : 0).setDuration(150).start();
+                name.setTextColor(has ? 0xFF0B0F13 : 0xF2FFFFFF);
+                if (fv != null) {
+                    fv.setTextColor(has ? 0xFF0B0F13 : 0x99FFFFFF);
+                    ((GradientDrawable) fv.getBackground()).setColor(has ? 0x1A000000 : 0x1FFFFFFF);
+                }
+                v.animate().scaleX(has ? 1.02f : 1f).scaleY(has ? 1.02f : 1f).setDuration(150).start();
             });
             row.setOnClickListener(v -> {
-                closePanel(false);
-                it.action.run();
+                if (it.stay) {
+                    it.action.run();
+                    if (panelRebuild != null) panelRebuild.run();
+                    if (panel != null && panel.getTag() instanceof List) {
+                        @SuppressWarnings("unchecked") List<View> r = (List<View>) panel.getTag();
+                        if (index < r.size()) r.get(index).requestFocus();
+                    }
+                } else {
+                    FrameLayout before = panel;
+                    it.action.run();
+                    if (panel == before) closePanel(false);
+                }
             });
-            row.setAlpha(0f);
-            row.setTranslationY(dp(10));
-            row.animate().alpha(1f).translationY(0).setStartDelay(160 + i * 35L).setDuration(260).start();
+            if (animate) {
+                row.setAlpha(0f);
+                row.setTranslationX(dp(24));
+                row.animate().alpha(1f).translationX(0).setStartDelay(140 + i * 30L).setDuration(320)
+                        .setInterpolator(new DecelerateInterpolator(2f)).start();
+            }
             card.addView(row, new LinearLayout.LayoutParams(-1, -2));
-            if (first == null) first = row;
+            rows.add(row);
             i++;
         }
+        panel.setTag(rows);
 
         ScrollView sv = new ScrollView(this);
+        sv.setClipChildren(false);
+        sv.setClipToPadding(false);
+        sv.setVerticalScrollBarEnabled(false);
         sv.addView(card);
-        panel.addView(sv, new FrameLayout.LayoutParams(dp(470), -2, Gravity.CENTER));
+        FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(dp(500), -2, Gravity.END | Gravity.CENTER_VERTICAL);
+        lp.setMargins(0, dp(30), dp(60), dp(30));
+        panel.addView(sv, lp);
         root.addView(panel, new FrameLayout.LayoutParams(-1, -1));
-        reveal(card, anchor, true, null);
-        if (first != null) {
-            final View f = first;
+        if (animate) {
+            card.setVisibility(View.INVISIBLE);
+            reveal(card, anchor, true, null);
+            card.setTranslationX(dp(30));
+            card.animate().translationX(0).setDuration(450).setInterpolator(new DecelerateInterpolator(2f)).start();
+        }
+        if (!rows.isEmpty()) {
+            final View f = rows.get(Math.max(0, Math.min(focusIndex, rows.size() - 1)));
             panel.postDelayed(f::requestFocus, 60);
         }
     }
@@ -944,12 +1106,16 @@ public class MainActivity extends Activity {
         if (panel == null) return;
         final FrameLayout p = panel;
         panel = null;
+        panelRebuild = null;
+        if (overlay == null) setBlur(false);
         if (animate) {
-            p.animate().alpha(0f).setDuration(220).withEndAction(() -> root.removeView(p)).start();
+            p.animate().alpha(0f).translationX(dp(20)).setDuration(220).withEndAction(() -> root.removeView(p)).start();
         } else {
             root.removeView(p);
         }
         if (panelAnchor != null && panelAnchor.isAttachedToWindow()) panelAnchor.requestFocus();
+        else if (overlay == null) focusFirst();
+        scheduleAmbient();
     }
 
     // ---------------------------------------------------------------- settings
@@ -959,47 +1125,75 @@ public class MainActivity extends Activity {
     }
 
     void showSettings(View anchor) {
+        panelRebuild = null;
+        showPanel(anchor, "Settings", settingsItems(anchor));
+        panelRebuild = () -> {
+            int focus = 0;
+            View fv = getCurrentFocus();
+            if (panel != null && panel.getTag() instanceof List) {
+                @SuppressWarnings("unchecked") List<View> r = (List<View>) panel.getTag();
+                focus = Math.max(0, r.indexOf(fv));
+            }
+            Runnable keep = panelRebuild;
+            showPanel(anchor, "Settings", settingsItems(anchor), false, focus);
+            panelRebuild = keep;
+        };
+    }
+
+    List<Item> settingsItems(View anchor) {
         boolean panOn = prefs.getBoolean("pan", true);
-        boolean h24 = prefs.getBoolean("h24", true);
         boolean showClock = prefs.getBoolean("clock", true);
+        boolean h24 = prefs.getBoolean("h24", true);
+        boolean amb = prefs.getBoolean("ambient", true);
         int bgChoice = prefs.getInt("bg", -1);
-        String wpLabel = bgChoice == -1 ? "All (rotating)" : bgChoice == 0 ? "Own picture" : WALLPAPER_NAMES[bgChoice - 1];
+        String wpLabel = bgChoice == -1 ? "Rotating" : bgChoice == 0 ? "Own picture" : WALLPAPER_NAMES[bgChoice - 1];
         List<Item> items = new ArrayList<>();
-        items.add(new Item("Wallpaper: " + wpLabel, () -> chooseWallpaper(anchor)));
-        items.add(new Item("Change wallpaper every: " + rotateLabel(prefs.getInt("rotate", 5)), () -> chooseRotate(anchor)));
-        items.add(new Item("Next wallpaper now", () -> {
+        items.add(new Item("Wallpaper", wpLabel, false, () -> chooseWallpaper(anchor)));
+        items.add(new Item("Change every", rotateLabel(prefs.getInt("rotate", 5)), false, () -> chooseRotate(anchor)));
+        items.add(new Item("Next wallpaper", "→", true, () -> {
             prefs.edit().putInt("bg", -1).apply();
             showWallpaper((wpIndex + 1 + WALLPAPERS.length) % WALLPAPERS.length, true);
             prefs.edit().putInt("lastWp", wpIndex).apply();
             scheduleRotate();
         }));
-        items.add(new Item("Moving wallpaper: " + (panOn ? "On" : "Off"), () -> {
+        items.add(new Item("Moving wallpaper", panOn ? "On" : "Off", true, () -> {
             prefs.edit().putBoolean("pan", !panOn).apply();
             startPan();
+            if (pan != null) pan.pause();
         }));
-        items.add(new Item("Clock: " + (showClock ? "Shown" : "Hidden"), () -> {
+        items.add(new Item("Clock", showClock ? "Shown" : "Hidden", true, () -> {
             prefs.edit().putBoolean("clock", !showClock).apply();
             applyClock();
         }));
-        items.add(new Item("Clock transparency: " + (100 - clockAlpha()) + "%", () -> chooseTransparency(anchor)));
-        items.add(new Item("Clock format: " + (h24 ? "24h" : "12h"), () -> {
-            prefs.edit().putBoolean("h24", !h24).apply();
-            applyClock();
+        items.add(new Item("Clock transparency", (100 - clockAlpha()) + "%", true, () -> {
+            int[] lv = {0, 20, 40, 55, 70, 85};
+            int cur = 100 - clockAlpha();
+            int next = lv[0];
+            for (int k = 0; k < lv.length; k++) if (lv[k] == cur) next = lv[(k + 1) % lv.length];
+            prefs.edit().putInt("clockAlpha", 100 - next).apply();
+            paintClock();
         }));
-        items.add(new Item("Home button (turn on the Home service)",
+        items.add(new Item("Clock format", h24 ? "24h" : "12h", true, () -> {
+            prefs.edit().putBoolean("h24", !h24).apply();
+            updateTime(true);
+        }));
+        items.add(new Item("Ambient mode after 1 min", amb ? "On" : "Off", true, () ->
+                prefs.edit().putBoolean("ambient", !amb).apply()));
+        items.add(new Item("Home button", "Set up", false,
                 () -> openSafe(new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))));
-        items.add(new Item("Android settings", () -> openSafe(new Intent(Settings.ACTION_SETTINGS))));
-        items.add(new Item("Reset apps", () -> {
+        items.add(new Item("Android settings", "Open", false, () -> openSafe(new Intent(Settings.ACTION_SETTINGS))));
+        items.add(new Item("Reset apps", "Default", true, () -> {
             prefs.edit().remove("dock").apply();
             refreshApps();
         }));
-        showPanel(anchor, "Settings", items);
+        return items;
     }
 
     void chooseRotate(View anchor) {
         List<Item> items = new ArrayList<>();
+        int cur = prefs.getInt("rotate", 5);
         for (int m : ROTATE_MIN) {
-            items.add(new Item(rotateLabel(m), () -> {
+            items.add(new Item(rotateLabel(m), m == cur ? "✓" : null, false, () -> {
                 prefs.edit().putInt("rotate", m).apply();
                 scheduleRotate();
             }));
@@ -1007,31 +1201,21 @@ public class MainActivity extends Activity {
         showPanel(anchor, "Change wallpaper every", items);
     }
 
-    void chooseTransparency(View anchor) {
-        List<Item> items = new ArrayList<>();
-        for (int lvl : new int[]{0, 20, 40, 55, 70, 85}) {
-            items.add(new Item(lvl + "%" + (lvl == 0 ? " (solid)" : ""), () -> {
-                prefs.edit().putInt("clockAlpha", 100 - lvl).apply();
-                paintClock();
-            }));
-        }
-        showPanel(anchor, "Clock transparency", items);
-    }
-
     void chooseWallpaper(View anchor) {
+        int cur = prefs.getInt("bg", -1);
         List<Item> items = new ArrayList<>();
-        items.add(new Item("All (rotating)", () -> {
+        items.add(new Item("All, rotating", cur == -1 ? "✓" : null, false, () -> {
             prefs.edit().putInt("bg", -1).apply();
             scheduleRotate();
         }));
         for (int i = 0; i < WALLPAPERS.length; i++) {
             final int idx = i;
-            items.add(new Item(WALLPAPER_NAMES[i], () -> {
+            items.add(new Item(WALLPAPER_NAMES[i], cur == i + 1 ? "✓" : null, false, () -> {
                 prefs.edit().putInt("bg", idx + 1).apply();
                 showWallpaper(idx, true);
             }));
         }
-        items.add(new Item("Own picture (bakgrund.jpg)", () -> {
+        items.add(new Item("Own picture (bakgrund.jpg)", cur == 0 ? "✓" : null, false, () -> {
             prefs.edit().putInt("bg", 0).apply();
             applyWallpaper();
         }));
