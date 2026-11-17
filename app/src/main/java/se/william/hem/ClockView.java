@@ -69,6 +69,8 @@ public class ClockView extends View {
     float panScale = 1.12f;
     int alphaPct = 60;
     int glow = 0x66FFFFFF;
+    /** 0 = soft cross-fade in place (default), 1 = roll in from below. */
+    int animStyle = 0;
 
     public ClockView(Context c) {
         super(c);
@@ -121,6 +123,10 @@ public class ClockView extends View {
         invalidate();
     }
 
+    public void setAnimStyle(int s) {
+        animStyle = s;
+    }
+
     public void setTime(String t, boolean animate) {
         if (t.equals(text)) return;
         old = text;
@@ -133,7 +139,7 @@ public class ClockView extends View {
         }
         progress = 0f;
         tickAnim = ValueAnimator.ofFloat(0f, 1f);
-        tickAnim.setDuration(1300);
+        tickAnim.setDuration(animStyle == 0 ? 750 : 1300);
         tickAnim.addUpdateListener(a -> {
             progress = (float) a.getAnimatedValue();
             invalidate();
@@ -310,15 +316,23 @@ public class ClockView extends View {
 
     void drawChar(Canvas canvas, char ch, float x, float dy, float scale, float pivotY,
                   float alpha, Bitmap[] layers, float[] layerAlpha) {
+        drawChar(canvas, ch, x, dy, scale, pivotY, alpha, 1f, layers, layerAlpha);
+    }
+
+    void drawChar(Canvas canvas, char ch, float x, float dy, float scale, float pivotY,
+                  float alpha, float glowMul, Bitmap[] layers, float[] layerAlpha) {
         if (alpha <= 0.004f) return;
         int base = Math.round(255 * alphaPct / 100f);
         canvas.save();
         canvas.translate(0, dy);
-        if (scale != 1f) canvas.scale(scale, scale, x, pivotY);
+        if (scale != 1f) {
+            float cx = x + fill.measureText(String.valueOf(ch)) / 2f;
+            canvas.scale(scale, scale, cx, pivotY);
+        }
 
         Bitmap gl = glowSprite(ch);
         if (gl != null) {
-            int ga = Math.round(Color.alpha(glow) * alpha * base / 255f);
+            int ga = Math.round(Color.alpha(glow) * alpha * glowMul * base / 255f);
             glowPaint.setColor((Math.max(0, Math.min(255, ga)) << 24) | (glow & 0xFFFFFF));
             int pad = (int) Math.ceil(Math.max(1f, digitHeight() * 0.12f / GLOW_SCALE) * 2.5f) + 2;
             canvas.save();
@@ -348,6 +362,41 @@ public class ClockView extends View {
         return xs;
     }
 
+    /**
+     * Inspired by the clock in the video: the changing digit melts into the next one in place.
+     * The old digit fades out while shrinking slightly, the new one fades in from a touch larger,
+     * and the glow swells briefly in the middle so the change reads as a soft "breath".
+     */
+    void drawCrossFade(Canvas canvas, float[] xn, float[] xo, boolean sameLen, int[] order,
+                       int changedCount, float pivotY, Bitmap[] layers, float[] layerAlpha) {
+        float stagger = changedCount > 1 ? 0.12f : 0f;
+        float span = 1f - stagger * Math.max(0, changedCount - 1);
+        // Old characters that are going away.
+        for (int i = 0; i < old.length(); i++) {
+            boolean changed = !sameLen || old.charAt(i) != text.charAt(i);
+            if (!changed) continue;
+            int ord = sameLen ? order[i] : Math.min(i, changedCount - 1);
+            float p = Math.max(0f, Math.min(1f, (progress - stagger * ord) / span));
+            float out = Math.min(1f, p * 1.4f);           // gone a bit before the end
+            float e = decel.getInterpolation(out);
+            drawChar(canvas, old.charAt(i), xo[i], 0, 1f - 0.05f * e, pivotY,
+                    1f - e, 1f + 1.6f * (float) Math.sin(Math.PI * p), layers, layerAlpha);
+        }
+        // New characters (unchanged ones just sit still).
+        for (int i = 0; i < text.length(); i++) {
+            char c = text.charAt(i);
+            if (order[i] < 0) {
+                drawChar(canvas, c, xn[i], 0, 1f, pivotY, 1f, layers, layerAlpha);
+                continue;
+            }
+            float p = Math.max(0f, Math.min(1f, (progress - stagger * order[i]) / span));
+            float in = Math.max(0f, (p - 0.15f) / 0.85f);  // starts just after the old one
+            float e = decel.getInterpolation(in);
+            drawChar(canvas, c, xn[i], 0, 1.05f - 0.05f * e, pivotY,
+                    e, 1f + 1.6f * (float) Math.sin(Math.PI * p), layers, layerAlpha);
+        }
+    }
+
     @Override
     protected void onDraw(Canvas canvas) {
         if (text.isEmpty() || getWidth() <= 0) return;
@@ -370,6 +419,11 @@ public class ClockView extends View {
 
         Bitmap[] layers = {glassOld, glassNew};
         float[] layerAlpha = {glassOld == null ? 0f : 1f - glassMix, glassOld == null ? 1f : glassMix};
+
+        if (animStyle == 0 && progress < 1f) {
+            drawCrossFade(canvas, xn, xo, sameLen, order, changedCount, pivotY, layers, layerAlpha);
+            return;
+        }
 
         for (int i = 0; i < text.length(); i++) {
             char c = text.charAt(i);

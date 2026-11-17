@@ -465,6 +465,7 @@ public class MainActivity extends Activity {
     void paintClock() {
         if (clock == null) return;
         clock.setAlphaPercent(clockAlpha());
+        clock.setAnimStyle(prefs.getInt("clockAnim", 0));
         clock.setGlow(withAlpha(tint, 70));
     }
 
@@ -1347,6 +1348,11 @@ public class MainActivity extends Activity {
             int next = lv[0];
             for (int k = 0; k < lv.length; k++) if (lv[k] == cur) next = lv[(k + 1) % lv.length];
             prefs.edit().putInt("clockAlpha", 100 - next).apply();
+            paintClock();
+        }));
+        int anim = prefs.getInt("clockAnim", 0);
+        items.add(new Item("Clock animation", anim == 0 ? "Fade" : "Roll", true, () -> {
+            prefs.edit().putInt("clockAnim", anim == 0 ? 1 : 0).apply();
             paintClock();
         }));
         items.add(new Item("Clock format", h24 ? "24h" : "12h", true, () -> {
