@@ -1635,6 +1635,15 @@ public class MainActivity extends Activity {
             captureSessions();
             refreshWatch();
         }));
+        String ip = localIp();
+        items.add(new Item("Phone remote", ip == null ? "No wifi" : ip + ":" + RemoteServer.PORT, false, () ->
+                Toast.makeText(this, ip == null ? "Connect the TV to wifi first"
+                        : "On your phone, open http://" + ip + ":" + RemoteServer.PORT
+                        + " in Safari, then Share > Add to Home Screen", Toast.LENGTH_LONG).show()));
+        items.add(new Item("Forget paired phones", null, false, () -> {
+            getSharedPreferences("remote", MODE_PRIVATE).edit().remove("tokens").apply();
+            Toast.makeText(this, "All phones must pair again", Toast.LENGTH_SHORT).show();
+        }));
         items.add(new Item("Home button", "Set up", false,
                 () -> openSafe(new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))));
         items.add(new Item("Android settings", "Open", false, () -> openSafe(new Intent(Settings.ACTION_SETTINGS))));
@@ -1643,6 +1652,19 @@ public class MainActivity extends Activity {
             refreshApps();
         }));
         return items;
+    }
+
+    static String localIp() {
+        try {
+            for (java.net.NetworkInterface ni : java.util.Collections.list(java.net.NetworkInterface.getNetworkInterfaces())) {
+                if (!ni.isUp() || ni.isLoopback()) continue;
+                for (java.net.InetAddress a : java.util.Collections.list(ni.getInetAddresses())) {
+                    if (a instanceof java.net.Inet4Address && a.isSiteLocalAddress()) return a.getHostAddress();
+                }
+            }
+        } catch (Exception ignored) {
+        }
+        return null;
     }
 
     void chooseRotate(View anchor) {

@@ -1,0 +1,447 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="TV Remote">
+<meta name="theme-color" content="#07090c">
+<link rel="apple-touch-icon" href="/static/icon.png">
+<link rel="manifest" href="/static/manifest.json">
+<title>TV Remote</title>
+<style>
+  :root {
+    --bg: #07090c;
+    --glass: rgba(255,255,255,0.06);
+    --glass-2: rgba(255,255,255,0.10);
+    --stroke: rgba(255,255,255,0.10);
+    --text: rgba(255,255,255,0.94);
+    --dim: rgba(255,255,255,0.55);
+    --faint: rgba(255,255,255,0.32);
+    --accent: #ff4d6d;
+    --ok: #39d98a;
+    --r: 22px;
+    --gap: 12px;
+    --safe-t: env(safe-area-inset-top, 0px);
+    --safe-b: env(safe-area-inset-bottom, 0px);
+    --safe-l: env(safe-area-inset-left, 0px);
+    --safe-r: env(safe-area-inset-right, 0px);
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
+    font: 500 14px/1.3 -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto, sans-serif;
+    -webkit-user-select: none; user-select: none; overscroll-behavior: none; overflow: hidden; }
+  body::before { content: ""; position: fixed; inset: -20%; z-index: -1;
+    background:
+      radial-gradient(40% 35% at 18% 12%, rgba(255,77,109,0.22), transparent 70%),
+      radial-gradient(45% 40% at 85% 20%, rgba(90,120,255,0.20), transparent 70%),
+      radial-gradient(50% 45% at 60% 100%, rgba(40,200,170,0.14), transparent 70%);
+    filter: blur(20px); }
+  button { font: inherit; color: inherit; border: 0; background: none; padding: 0; cursor: pointer; }
+  svg { display: block; }
+  .glass { background: var(--glass); border: 1px solid var(--stroke); border-radius: var(--r);
+    -webkit-backdrop-filter: blur(24px) saturate(1.4); backdrop-filter: blur(24px) saturate(1.4); }
+
+  /* ---------- layout: phone held sideways (like the video) ---------- */
+  .app { position: fixed; inset: 0;
+    padding: calc(var(--safe-t) + 10px) calc(var(--safe-r) + 14px) calc(var(--safe-b) + 10px) calc(var(--safe-l) + 14px);
+    display: grid; gap: var(--gap);
+    grid-template-columns: minmax(250px, 0.9fr) 1.3fr;
+    grid-template-rows: auto 1fr auto;
+    grid-template-areas: "top top" "pad side" "controls side"; }
+  .top { grid-area: top; display: flex; align-items: center; gap: 8px; min-height: 36px; }
+  .pill { height: 34px; padding: 0 14px; border-radius: 17px; display: inline-flex; align-items: center; gap: 7px;
+    background: var(--glass); border: 1px solid var(--stroke); color: var(--dim); font-weight: 600; font-size: 13px;
+    transition: transform .18s cubic-bezier(.2,.8,.2,1), background .18s; }
+  .pill:active { transform: scale(0.94); background: var(--glass-2); }
+  .pill.on { color: #0b0f13; background: rgba(255,255,255,0.92); }
+  .round { width: 34px; padding: 0; justify-content: center; }
+  .spacer { flex: 1; }
+  .status { display: inline-flex; align-items: center; gap: 7px; color: var(--faint); font-size: 12px; font-weight: 600; }
+  .dot { width: 7px; height: 7px; border-radius: 50%; background: #666; box-shadow: 0 0 0 3px rgba(255,255,255,0.05); transition: background .3s; }
+  .dot.live { background: var(--ok); box-shadow: 0 0 10px rgba(57,217,138,0.7); }
+  .dot.dead { background: var(--accent); }
+
+  /* ---------- touchpad ---------- */
+  .pad { grid-area: pad; position: relative; overflow: hidden; touch-action: none; min-height: 180px;
+    background: linear-gradient(160deg, rgba(255,255,255,0.08), rgba(255,255,255,0.025)); }
+  .pad .ring { position: absolute; left: 50%; top: 50%; width: 74px; height: 74px; margin: -37px 0 0 -37px;
+    border-radius: 50%; border: 1.5px solid rgba(255,255,255,0.22);
+    transition: transform .25s cubic-bezier(.2,.8,.2,1), background .25s, border-color .25s; }
+  .pad.press .ring { transform: scale(0.86); background: rgba(255,255,255,0.12); border-color: rgba(255,255,255,0.5); }
+  .pad .hint { position: absolute; left: 0; right: 0; bottom: 14px; text-align: center; color: var(--faint); font-size: 11.5px; pointer-events: none; }
+  .chev { position: absolute; width: 54px; height: 54px; display: grid; place-items: center; color: rgba(255,255,255,0.4);
+    transition: color .15s, transform .2s cubic-bezier(.2,.8,.2,1); }
+  .chev svg { width: 18px; height: 18px; }
+  .chev.flash { color: #fff; transform: scale(1.25); }
+  .chev.up { top: 4px; left: 50%; margin-left: -27px; }
+  .chev.down { bottom: 26px; left: 50%; margin-left: -27px; }
+  .chev.left { left: 4px; top: 50%; margin-top: -27px; }
+  .chev.right { right: 4px; top: 50%; margin-top: -27px; }
+  .touch { position: absolute; width: 56px; height: 56px; margin: -28px 0 0 -28px; border-radius: 50%; pointer-events: none;
+    background: radial-gradient(circle, rgba(255,255,255,0.35), rgba(255,255,255,0) 70%); opacity: 0; transition: opacity .2s; }
+  .touch.on { opacity: 1; }
+  .ripple { position: absolute; width: 20px; height: 20px; margin: -10px 0 0 -10px; border-radius: 50%; pointer-events: none;
+    border: 2px solid rgba(255,255,255,0.7); animation: ripple .5s ease-out forwards; }
+  @keyframes ripple { to { transform: scale(6); opacity: 0; } }
+
+  /* ---------- buttons row ---------- */
+  .controls { grid-area: controls; display: flex; gap: 8px; justify-content: space-between; }
+  .btn { flex: 1; height: 46px; border-radius: 16px; display: grid; place-items: center; background: var(--glass);
+    border: 1px solid var(--stroke); transition: transform .16s cubic-bezier(.2,.8,.2,1), background .16s; }
+  .btn svg { width: 20px; height: 20px; }
+  .btn:active, .btn.held { transform: scale(0.9); background: var(--glass-2); }
+  .vol { flex: 2.4; display: flex; padding: 0; overflow: hidden; }
+  .vol button { flex: 1; height: 100%; display: grid; place-items: center; transition: background .15s; }
+  .vol button:active, .vol button.held { background: var(--glass-2); }
+  .vol button + button { border-left: 1px solid var(--stroke); }
+
+  /* ---------- right side ---------- */
+  .side { grid-area: side; display: flex; flex-direction: column; gap: var(--gap); min-height: 0; }
+  .label { color: var(--dim); font-size: 12px; font-weight: 700; letter-spacing: .02em; margin: 2px 4px 8px; }
+  .now { display: flex; align-items: center; gap: 12px; padding: 12px 14px; min-height: 64px; }
+  .now .art { width: 40px; height: 40px; border-radius: 10px; background: var(--glass-2); flex: none; overflow: hidden; }
+  .now .art img { width: 100%; height: 100%; object-fit: cover; }
+  .now .meta { flex: 1; min-width: 0; }
+  .now .t { font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .now .s { color: var(--dim); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: 2px; }
+  .now .pp { width: 40px; height: 40px; border-radius: 50%; background: rgba(255,255,255,0.92); color: #0b0f13; display: grid; place-items: center; flex: none;
+    transition: transform .16s cubic-bezier(.2,.8,.2,1); }
+  .now .pp:active { transform: scale(0.88); }
+  .now .pp svg { width: 18px; height: 18px; }
+  .apps-wrap { flex: 1; min-height: 0; overflow-y: auto; -webkit-overflow-scrolling: touch; padding-bottom: 4px; }
+  .apps { display: grid; grid-template-columns: repeat(auto-fill, minmax(66px, 1fr)); gap: 12px 10px; }
+  .appbtn { display: flex; flex-direction: column; align-items: center; gap: 6px; transition: transform .18s cubic-bezier(.2,.8,.2,1); }
+  .appbtn:active { transform: scale(0.88); }
+  .appbtn img { width: 58px; height: 58px; border-radius: 15px; background: var(--glass-2); object-fit: cover;
+    box-shadow: 0 6px 18px rgba(0,0,0,0.35); }
+  .appbtn span { font-size: 11px; color: var(--dim); max-width: 70px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .appbtn.launching img { animation: pop .5s cubic-bezier(.2,.8,.2,1); }
+  @keyframes pop { 40% { transform: scale(1.18); box-shadow: 0 0 0 6px rgba(255,255,255,0.18); } }
+
+  .type { display: flex; align-items: center; gap: 8px; padding: 6px 6px 6px 14px; border-radius: 22px; }
+  .type input { flex: 1; min-width: 0; height: 32px; border: 0; outline: 0; background: transparent; color: var(--text);
+    font: inherit; font-size: 16px; -webkit-user-select: text; user-select: text; }
+  .type input::placeholder { color: var(--faint); }
+  .type .send { width: 32px; height: 32px; border-radius: 50%; background: rgba(255,255,255,0.92); color: #0b0f13; display: grid; place-items: center; }
+  .type .send svg { width: 16px; height: 16px; }
+  .type.bad { animation: shake .35s; }
+  @keyframes shake { 25% { transform: translateX(-6px); } 75% { transform: translateX(6px); } }
+
+  /* ---------- pairing ---------- */
+  .pair { position: fixed; inset: 0; display: none; place-items: center; padding: 24px; z-index: 5;
+    background: rgba(7,9,12,0.7); -webkit-backdrop-filter: blur(30px); backdrop-filter: blur(30px); }
+  .pair.on { display: grid; animation: fade .35s ease; }
+  @keyframes fade { from { opacity: 0; } }
+  .pair .card { width: min(360px, 100%); padding: 26px 22px; text-align: center; }
+  .pair h1 { margin: 0 0 6px; font-size: 22px; }
+  .pair p { margin: 0 0 18px; color: var(--dim); }
+  .digits { display: flex; justify-content: center; gap: 10px; margin-bottom: 16px; }
+  .digits input { width: 52px; height: 62px; border-radius: 14px; border: 1px solid var(--stroke); background: var(--glass);
+    color: var(--text); text-align: center; font: 700 26px/1 inherit; outline: 0; -webkit-user-select: text; user-select: text; }
+  .digits input:focus { border-color: rgba(255,255,255,0.5); }
+  .big { width: 100%; height: 48px; border-radius: 16px; background: rgba(255,255,255,0.92); color: #0b0f13; font-weight: 700; font-size: 16px;
+    transition: transform .16s cubic-bezier(.2,.8,.2,1); }
+  .big:active { transform: scale(0.96); }
+  .err { color: var(--accent); min-height: 18px; margin-top: 10px; font-size: 13px; }
+
+  .toast { position: fixed; left: 50%; bottom: calc(var(--safe-b) + 18px); transform: translate(-50%, 20px); opacity: 0;
+    padding: 10px 16px; border-radius: 14px; background: rgba(30,32,36,0.92); color: var(--text); font-size: 13px; z-index: 9;
+    transition: all .3s cubic-bezier(.2,.8,.2,1); pointer-events: none; white-space: nowrap; }
+  .toast.on { opacity: 1; transform: translate(-50%, 0); }
+
+  /* ---------- phone held upright ---------- */
+  @media (orientation: portrait) {
+    .app { grid-template-columns: 1fr; grid-template-rows: auto auto minmax(240px, 1fr) auto auto;
+      grid-template-areas: "top" "now" "pad" "controls" "type"; }
+    .side { display: contents; }
+    .now-wrap { grid-area: now; }
+    .type { grid-area: type; }
+    .apps-wrap { display: none; grid-area: pad; }
+    .app.show-apps .apps-wrap { display: block; }
+    .app.show-apps .pad { display: none; }
+    .status #statusText { display: none; }
+    .now-wrap .label { display: none; }
+  }
+</style>
+</head>
+<body>
+
+<div class="app" id="app">
+  <div class="top">
+    <button class="pill" data-key="home" aria-label="Home">
+      <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 11l9-7 9 7"/><path d="M5 10v10h14V10"/></svg>Home
+    </button>
+    <button class="pill" id="appsToggle">Apps</button>
+    <span class="spacer"></span>
+    <span class="status"><span class="dot" id="dot"></span><span id="statusText">Connecting…</span></span>
+    <button class="pill round" data-key="settings" aria-label="TV settings">
+      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>
+    </button>
+  </div>
+
+  <div class="pad glass" id="pad">
+    <button class="chev up" data-key="up" aria-label="Up"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M6 15l6-6 6 6"/></svg></button>
+    <button class="chev down" data-key="down" aria-label="Down"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg></button>
+    <button class="chev left" data-key="left" aria-label="Left"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M15 6l-6 6 6 6"/></svg></button>
+    <button class="chev right" data-key="right" aria-label="Right"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg></button>
+    <div class="ring"></div>
+    <div class="touch" id="touch"></div>
+    <div class="hint">Swipe to move · tap to select</div>
+  </div>
+
+  <div class="controls">
+    <button class="btn" data-key="back" aria-label="Back"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 6l-6 6 6 6"/></svg></button>
+    <button class="btn" data-key="rew" aria-label="Rewind"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M11 6v12l-8-6zM20 6v12l-8-6z"/></svg></button>
+    <button class="btn" data-key="playpause" aria-label="Play or pause"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M4 5l9 7-9 7z"/><rect x="15" y="5" width="2.6" height="14" rx="1"/><rect x="19.4" y="5" width="2.6" height="14" rx="1"/></svg></button>
+    <button class="btn" data-key="ff" aria-label="Fast forward"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M4 6v12l8-6zM13 6v12l8-6z"/></svg></button>
+    <div class="btn vol">
+      <button data-key="voldown" data-repeat aria-label="Volume down"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M6 12h12"/></svg></button>
+      <button data-key="mute" aria-label="Mute"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 5L6 9H3v6h3l5 4z"/><path d="M16 9l5 6M21 9l-5 6"/></svg></button>
+      <button data-key="volup" data-repeat aria-label="Volume up"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M6 12h12M12 6v12"/></svg></button>
+    </div>
+  </div>
+
+  <div class="side">
+    <div class="now-wrap">
+      <div class="label">Now playing</div>
+      <div class="now glass">
+        <div class="art" id="nowArt"></div>
+        <div class="meta"><div class="t" id="nowTitle">Nothing playing</div><div class="s" id="nowSub">Start something on the TV</div></div>
+        <button class="pp" data-key="playpause" aria-label="Play or pause"><svg viewBox="0 0 24 24" fill="currentColor" id="ppIcon"><path d="M7 5l12 7-12 7z"/></svg></button>
+      </div>
+    </div>
+    <div class="apps-wrap">
+      <div class="label">Apps</div>
+      <div class="apps" id="apps"></div>
+    </div>
+    <form class="type glass" id="typeForm" autocomplete="off">
+      <input id="typeInput" placeholder="Type on the TV…" enterkeyhint="search" autocorrect="off" autocapitalize="none" spellcheck="false">
+      <button class="send" aria-label="Search"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg></button>
+    </form>
+  </div>
+</div>
+
+<div class="pair" id="pair">
+  <div class="card glass">
+    <h1>Connect to your TV</h1>
+    <p id="pairText">Tap the button and a 4-digit code shows up on the TV.</p>
+    <div class="digits" id="digits" style="display:none">
+      <input inputmode="numeric" maxlength="1" pattern="[0-9]*"><input inputmode="numeric" maxlength="1" pattern="[0-9]*"><input inputmode="numeric" maxlength="1" pattern="[0-9]*"><input inputmode="numeric" maxlength="1" pattern="[0-9]*">
+    </div>
+    <button class="big" id="pairBtn">Show code on TV</button>
+    <div class="err" id="pairErr"></div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+(() => {
+  const $ = (id) => document.getElementById(id);
+  let token = '';
+  try { token = localStorage.getItem('hemToken') || ''; } catch (e) {}
+
+  // ---------- talking to the TV ----------
+  // Presses are sent one after another so they never arrive out of order.
+  let chain = Promise.resolve();
+  function call(path, opts = {}) {
+    return fetch(path, {
+      method: opts.method || 'POST',
+      headers: Object.assign({ 'X-Token': token }, opts.headers || {}),
+      body: opts.body,
+      cache: 'no-store',
+    }).then(async (r) => {
+      if (r.status === 401) { showPair(); throw new Error('not paired'); }
+      setLive(true);
+      return r.headers.get('content-type')?.includes('json') ? r.json() : r;
+    }).catch((e) => { if (e.message !== 'not paired') setLive(false); throw e; });
+  }
+  function key(name) {
+    chain = chain.then(() => call('/key/' + name)).catch(() => {});
+    return chain;
+  }
+
+  let toastTimer;
+  function toast(msg) {
+    const t = $('toast'); t.textContent = msg; t.classList.add('on');
+    clearTimeout(toastTimer); toastTimer = setTimeout(() => t.classList.remove('on'), 2200);
+  }
+  function setLive(ok) {
+    $('dot').className = 'dot ' + (ok ? 'live' : 'dead');
+    $('statusText').textContent = ok ? 'TV connected' : 'Can’t reach TV';
+  }
+
+  // ---------- buttons (hold to repeat for arrows and volume) ----------
+  document.querySelectorAll('[data-key]').forEach((b) => {
+    const k = b.dataset.key;
+    const repeats = b.hasAttribute('data-repeat') || b.classList.contains('chev');
+    let hold, rep;
+    const stop = () => { clearTimeout(hold); clearInterval(rep); b.classList.remove('held'); };
+    b.addEventListener('pointerdown', (e) => {
+      e.preventDefault(); e.stopPropagation();
+      b.classList.add('held');
+      if (b.classList.contains('chev')) flash(k);
+      key(k);
+      if (repeats) hold = setTimeout(() => { rep = setInterval(() => { key(k); if (b.classList.contains('chev')) flash(k); }, 130); }, 420);
+    });
+    ['pointerup', 'pointercancel', 'pointerleave'].forEach((ev) => b.addEventListener(ev, stop));
+    b.addEventListener('click', (e) => e.preventDefault());
+  });
+
+  function flash(dir) {
+    const c = document.querySelector('.chev.' + dir);
+    if (!c) return;
+    c.classList.add('flash'); setTimeout(() => c.classList.remove('flash'), 160);
+  }
+
+  // ---------- touchpad: swipe = arrows, tap = OK ----------
+  const pad = $('pad'), touch = $('touch');
+  const STEP = 34;
+  let sx, sy, ox, oy, t0, moved, active = false;
+  pad.addEventListener('pointerdown', (e) => {
+    if (e.target.closest('.chev')) return;
+    active = true; pad.setPointerCapture(e.pointerId);
+    const r = pad.getBoundingClientRect();
+    sx = ox = e.clientX; sy = oy = e.clientY; t0 = Date.now(); moved = 0;
+    touch.style.left = (e.clientX - r.left) + 'px'; touch.style.top = (e.clientY - r.top) + 'px';
+    touch.classList.add('on');
+  });
+  pad.addEventListener('pointermove', (e) => {
+    if (!active) return;
+    const r = pad.getBoundingClientRect();
+    touch.style.left = (e.clientX - r.left) + 'px'; touch.style.top = (e.clientY - r.top) + 'px';
+    const dx = e.clientX - ox, dy = e.clientY - oy;
+    if (Math.max(Math.abs(dx), Math.abs(dy)) >= STEP) {
+      const dir = Math.abs(dx) > Math.abs(dy) ? (dx > 0 ? 'right' : 'left') : (dy > 0 ? 'down' : 'up');
+      key(dir); flash(dir); moved++;
+      ox = e.clientX; oy = e.clientY;
+    }
+  });
+  const end = (e) => {
+    if (!active) return;
+    active = false; touch.classList.remove('on');
+    const dist = Math.hypot(e.clientX - sx, e.clientY - sy);
+    if (!moved && dist < 12 && Date.now() - t0 < 450) {
+      key('ok');
+      pad.classList.add('press'); setTimeout(() => pad.classList.remove('press'), 160);
+      const r = pad.getBoundingClientRect(), rp = document.createElement('div');
+      rp.className = 'ripple'; rp.style.left = (e.clientX - r.left) + 'px'; rp.style.top = (e.clientY - r.top) + 'px';
+      pad.appendChild(rp); setTimeout(() => rp.remove(), 520);
+    }
+  };
+  pad.addEventListener('pointerup', end);
+  pad.addEventListener('pointercancel', () => { active = false; touch.classList.remove('on'); });
+
+  // ---------- apps ----------
+  $('appsToggle').addEventListener('click', () => {
+    $('app').classList.toggle('show-apps');
+    $('appsToggle').classList.toggle('on');
+  });
+  function loadApps() {
+    call('/apps', { method: 'GET' }).then((d) => {
+      const box = $('apps'); box.innerHTML = '';
+      (d.apps || []).forEach((a) => {
+        const b = document.createElement('button'); b.className = 'appbtn';
+        const img = document.createElement('img');
+        img.src = '/icon?p=' + encodeURIComponent(a.p) + '&t=' + token; img.alt = '';
+        const s = document.createElement('span'); s.textContent = a.name;
+        b.append(img, s);
+        b.addEventListener('click', () => {
+          b.classList.remove('launching'); void b.offsetWidth; b.classList.add('launching');
+          call('/launch?p=' + encodeURIComponent(a.p)).then((r) => { if (!r.ok) toast('Couldn’t open ' + a.name); }).catch(() => {});
+          $('app').classList.remove('show-apps'); $('appsToggle').classList.remove('on');
+        });
+        box.appendChild(b);
+      });
+    }).catch(() => {});
+  }
+
+  // ---------- now playing ----------
+  let lastNow = '';
+  function poll() {
+    if (document.hidden || !token) return;
+    call('/now', { method: 'GET' }).then((d) => {
+      const sig = JSON.stringify(d);
+      if (sig === lastNow) return; lastNow = sig;
+      if (d.title) {
+        $('nowTitle').textContent = d.title;
+        $('nowSub').textContent = [d.sub, d.app].filter(Boolean).join(' · ');
+        $('nowArt').innerHTML = '<img src="/icon?p=' + encodeURIComponent(d.p) + '&t=' + token + '" alt="">';
+        $('ppIcon').innerHTML = d.playing ? '<rect x="6" y="5" width="4" height="14" rx="1"/><rect x="14" y="5" width="4" height="14" rx="1"/>' : '<path d="M7 5l12 7-12 7z"/>';
+      } else {
+        $('nowTitle').textContent = 'Nothing playing'; $('nowSub').textContent = 'Start something on the TV';
+        $('nowArt').innerHTML = ''; $('ppIcon').innerHTML = '<path d="M7 5l12 7-12 7z"/>';
+      }
+    }).catch(() => {});
+  }
+  setInterval(poll, 2500);
+  document.addEventListener('visibilitychange', poll);
+
+  // ---------- typing on the TV ----------
+  const input = $('typeInput');
+  let typeTimer;
+  function sendText(enter) {
+    return call('/text' + (enter ? '?enter=1' : ''), { body: input.value, headers: { 'Content-Type': 'text/plain' } })
+      .then((r) => { if (!r.ok) { $('typeForm').classList.remove('bad'); void $('typeForm').offsetWidth; $('typeForm').classList.add('bad'); toast('Open a search box on the TV first'); } })
+      .catch(() => {});
+  }
+  input.addEventListener('input', () => { clearTimeout(typeTimer); typeTimer = setTimeout(() => sendText(false), 280); });
+  $('typeForm').addEventListener('submit', (e) => {
+    e.preventDefault(); clearTimeout(typeTimer);
+    sendText(true).then(() => { input.value = ''; input.blur(); });
+  });
+
+  // ---------- pairing ----------
+  const digits = [...document.querySelectorAll('#digits input')];
+  function showPair() {
+    $('pair').classList.add('on');
+  }
+  function hidePair() { $('pair').classList.remove('on'); }
+  $('pairBtn').addEventListener('click', () => {
+    $('pairErr').textContent = '';
+    if ($('digits').style.display === 'none') {
+      fetch('/pair/start', { method: 'POST' }).then(() => {
+        $('digits').style.display = 'flex';
+        $('pairText').textContent = 'Type the code you see on the TV.';
+        $('pairBtn').textContent = 'Connect';
+        digits[0].focus();
+      }).catch(() => { $('pairErr').textContent = 'Can’t reach the TV. Same wifi?'; });
+    } else {
+      tryPair();
+    }
+  });
+  digits.forEach((d, i) => {
+    d.addEventListener('input', () => {
+      d.value = d.value.replace(/\D/g, '').slice(-1);
+      if (d.value && i < 3) digits[i + 1].focus();
+      if (digits.every((x) => x.value)) tryPair();
+    });
+    d.addEventListener('keydown', (e) => { if (e.key === 'Backspace' && !d.value && i > 0) digits[i - 1].focus(); });
+  });
+  function tryPair() {
+    const code = digits.map((x) => x.value).join('');
+    if (code.length < 4) return;
+    fetch('/pair?code=' + code, { method: 'POST' }).then((r) => r.json()).then((d) => {
+      if (!d.token) throw new Error();
+      token = d.token;
+      try { localStorage.setItem('hemToken', token); } catch (e) {}
+      hidePair(); digits.forEach((x) => (x.value = '')); digits.forEach((x) => x.blur());
+      start();
+    }).catch(() => {
+      $('pairErr').textContent = 'Wrong code. Try again.';
+      digits.forEach((x) => (x.value = '')); digits[0].focus();
+    });
+  }
+
+  function start() {
+    call('/hello').then(() => { loadApps(); poll(); }).catch(() => {});
+  }
+
+  if (!token) showPair(); else start();
+})();
+</script>
+</body>
+</html>
